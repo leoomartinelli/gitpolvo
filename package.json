@@ -82,10 +82,12 @@
         "libatspi2.0-0",
         "libuuid1",
         "libsecret-1-0"
-      ]
+      ],
+      "afterInstall": "build/linux-after-install.sh"
     },
     "rpm": {
-      "artifactName": "gitpolvo-${version}.${arch}.${ext}"
+      "artifactName": "gitpolvo-${version}.${arch}.${ext}",
+      "afterInstall": "build/linux-after-install.sh"
     },
     "win": {
       "target": [

@@ -18,6 +18,15 @@ if (IS_MAC) {
   process.env.PATH = [...extra, ...(process.env.PATH || '').split(':')].filter((v, i, a) => v && a.indexOf(v) === i).join(':');
 }
 
+// AppImage roda de um ponto de montagem "nosuid", então o helper setuid do
+// sandbox não funciona; em sistemas que bloqueiam user namespaces (Ubuntu
+// 23.10+) o Chromium abortaria. Nesse caso específico, desliga o sandbox.
+if (process.platform === 'linux' && process.env.APPIMAGE) {
+  try {
+    if (fs.readFileSync('/proc/sys/kernel/apparmor_restrict_unprivileged_userns', 'utf8').trim() === '1') app.commandLine.appendSwitch('no-sandbox');
+  } catch {}
+}
+
 const SETTINGS_FILE = () => path.join(app.getPath('userData'), 'settings.json');
 const DEFAULT_SETTINGS = { recent: [], openTabs: [], theme: 'dark', zoom: 0, avatars: true };
 
