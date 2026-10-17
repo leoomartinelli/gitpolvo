@@ -1,6 +1,6 @@
 'use strict';
 
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
 contextBridge.exposeInMainWorld('polvo', {
   git: (cwd, args, input) => ipcRenderer.invoke('git:run', cwd, args, input),
@@ -23,6 +23,10 @@ contextBridge.exposeInMainWorld('polvo', {
   readFile: (repo, rel) => ipcRenderer.invoke('fs:readFile', repo, rel),
   writeFile: (repo, rel, content) => ipcRenderer.invoke('fs:writeFile', repo, rel, content),
   appInfo: () => ipcRenderer.invoke('app:info'),
+  zoom: {
+    get: () => webFrame.getZoomFactor(),
+    reset: () => webFrame.setZoomFactor(1),
+  },
   avatar: (email, ctx) => ipcRenderer.invoke('avatar:get', email, ctx),
   clearAvatars: () => ipcRenderer.invoke('avatar:clear'),
   onRepoChanged: (fn) => ipcRenderer.on('repo:changed', (_e, p) => fn(p)),

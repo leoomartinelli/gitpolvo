@@ -907,6 +907,7 @@
         bar.classList.remove('hidden');
       };
       const manualCheck = this.manualUpdateCheck;
+      this.renderStatusUpdate(st);
       if (st.state === 'available') {
         this.manualUpdateCheck = false;
         const s = await polvo.settings.get();
@@ -938,6 +939,54 @@
       }
     }
 
+    // ---------- barra de status (rodapé) ----------
+    async initStatusBar() {
+      const right = document.querySelector('#statusbar .sb-right');
+      const info = await polvo.appInfo();
+      this.sbZoom = h('button', { class: 'sb-item', title: 'Zoom (clique para voltar a 100%)', onclick: () => (polvo.zoom.reset(), this.updateZoom()) });
+      right.append(
+        this.sbZoom,
+        h('button', { class: 'sb-version', title: 'Versão instalada — clique para ver detalhes', onclick: () => this.showAbout() }, info.version)
+      );
+      this.updateZoom();
+      // o zoom do Chromium dispara "resize" na página
+      window.addEventListener('resize', () => this.updateZoom());
+    }
+
+    updateZoom() {
+      if (this.sbZoom) this.sbZoom.textContent = `🔍 ${Math.round(polvo.zoom.get() * 100)}%`;
+    }
+
+    renderStatusUpdate(st) {
+      const left = document.querySelector('#statusbar .sb-left');
+      left.innerHTML = '';
+      if (st.state === 'available') {
+        this.pendingUpdate = st;
+        left.append(
+          h(
+            'button',
+            {
+              class: 'sb-update',
+              title: 'Clique para ver as opções de atualização',
+              onclick: () => {
+                this.manualUpdateCheck = true;
+                this.onUpdateStatus(st);
+              },
+            },
+            `Atualização disponível (${st.version})`
+          )
+        );
+      } else if (st.state === 'downloading') {
+        left.append(h('span', { class: 'sb-item' }, `Baixando atualização… ${st.percent || 0}%`));
+      } else if (st.state === 'ready') {
+        left.append(h('button', { class: 'sb-update', onclick: () => this.onUpdateStatus(st) }, `Reiniciar para atualizar (${st.version})`));
+      } else if (st.state === 'error' && this.pendingUpdate) {
+        // falhou ao baixar: volta a oferecer a versão
+        const pending = this.pendingUpdate;
+        setTimeout(() => this.renderStatusUpdate(pending), 0);
+      }
+    }
+
     checkUpdates() {
       this.manualUpdateCheck = true;
       polvo.updates.check();
@@ -949,6 +998,7 @@
     }
 
     async start() {
+      this.initStatusBar();
       const s = await polvo.settings.get();
       this.settings = s;
       document.documentElement.dataset.theme = s.theme || 'dark';
