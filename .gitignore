@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.deb
+*.rpm
+*.AppImage
+*.dmg
+*.exe
+.DS_Store

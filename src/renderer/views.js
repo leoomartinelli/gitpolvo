@@ -1,0 +1,1342 @@
+'use strict';
+
+// Renderização das áreas de uma aba de repositório. Cada função recebe a aba
+// (RepoTab, definida em app.js) e lê o estado dela; ações chamam métodos da aba.
+
+(() => {
+  const { h, svg, laneColor, avatar, relDate, fullDate, showMenu } = window.UI;
+  const LW = 24;
+  const NODE = 20; // diâmetro da foto no nó do grafo
+  const CORNER = 12; // raio das dobras das linhas do grafo
+  const ICON_LAPTOP =
+    '<svg viewBox="0 0 16 16" width="12" height="12"><rect x="3" y="3.5" width="10" height="6.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M1 12.5h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+  // ícone de remoto: cubo laranja
+  const ICON_CLOUD =
+    '<svg viewBox="0 0 16 16" width="13" height="13"><path d="M8 1.6l5.6 3.1v6.6L8 14.4l-5.6-3.1V4.7z" fill="none" stroke="#f0883e" stroke-width="1.5" stroke-linejoin="round"/><path d="M2.6 4.8L8 7.8l5.4-3M8 7.8v6.4" fill="none" stroke="#f0883e" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+  const ICON_TAG =
+    '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M2 2h6l6 6-6 6-6-6z" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="5.5" cy="5.5" r="1.2" fill="currentColor"/></svg>';
+  const icon = (svgText) => h('span', { class: 'bi', html: svgText });
+  const graphWidth = (maxLanes) => Math.max(64, maxLanes * LW + 10);
+  const ROW_H = 28;
+
+  const STATUS_LABEL = { A: 'Adicionado', M: 'Modificado', D: 'Removido', R: 'Renomeado', C: 'Copiado', T: 'Tipo alterado', U: 'Conflito' };
+
+  const STATUS_SVG = {
+    M: '<path d="M10.5 2.5l3 3L6 13H3v-3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>',
+    A: '<path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+    D: '<path d="M3 8h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+    R: '<path d="M3 8h9M9 4.5L12.5 8 9 11.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+    C: '<rect x="5" y="5" width="8" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 10V3h7" fill="none" stroke="currentColor" stroke-width="1.4"/>',
+    T: '<path d="M3 4h10M8 4v9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
+    U: '<path d="M8 3v6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="8" cy="12.5" r="1.2" fill="currentColor"/>',
+  };
+
+  function statusIcon(s) {
+    return h('span', { class: `sti sti-${s}`, title: STATUS_LABEL[s] || s, html: `<svg viewBox="0 0 16 16" width="14" height="14">${STATUS_SVG[s] || STATUS_SVG.M}</svg>` });
+  }
+
+  // "pasta/sub/" esmaecido + "arquivo.ext" em destaque
+  function pathLabel(p) {
+    const i = p.lastIndexOf('/');
+    return h('span', { class: 'fpath' }, i >= 0 ? h('span', { class: 'fdir' }, p.slice(0, i + 1)) : null, h('span', { class: 'fname' }, p.slice(i + 1)));
+  }
+
+  // ---------- estrutura ----------
+  // Arrastar uma branch (etiqueta do grafo ou item da barra lateral) e soltar em
+  // outra abre o menu de ações (merge, rebase, fast-forward, push, PR).
+  function parseRef(raw) {
+    const i = raw.indexOf(':');
+    return { type: raw.slice(0, i), name: raw.slice(i + 1) };
+  }
+
+  function installRefDnD(tab, container) {
+    let over = null;
+    const clear = () => {
+      if (over) over.classList.remove('drop-target');
+      over = null;
+    };
+    container.addEventListener('dragstart', (e) => {
+      const el = e.target.closest && e.target.closest('[data-ref]');
+      if (!el) return;
+      tab.dragRef = el.dataset.ref;
+      e.dataTransfer.setData('application/x-polvo-ref', el.dataset.ref);
+      e.dataTransfer.effectAllowed = 'move';
+      el.classList.add('dragging');
+      document.body.classList.add('ref-dragging');
+    });
+    container.addEventListener('dragend', (e) => {
+      const el = e.target.closest && e.target.closest('[data-ref]');
+      if (el) el.classList.remove('dragging');
+      document.body.classList.remove('ref-dragging');
+      tab.dragRef = null;
+      clear();
+    });
+    container.addEventListener('dragover', (e) => {
+      const el = e.target.closest && e.target.closest('[data-ref]');
+      if (!tab.dragRef || !el || el.dataset.ref === tab.dragRef) {
+        clear();
+        return;
+      }
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (over !== el) {
+        clear();
+        over = el;
+        el.classList.add('drop-target');
+      }
+    });
+    container.addEventListener('dragleave', (e) => {
+      if (over && !over.contains(e.relatedTarget)) clear();
+    });
+    container.addEventListener('drop', (e) => {
+      const el = e.target.closest && e.target.closest('[data-ref]');
+      const src = tab.dragRef || e.dataTransfer.getData('application/x-polvo-ref');
+      clear();
+      if (!el || !src || el.dataset.ref === src) return;
+      e.preventDefault();
+      tab.dropRef(parseRef(src), parseRef(el.dataset.ref), e.clientX, e.clientY);
+    });
+  }
+
+  function buildLayout(tab) {
+    const els = (tab.els = {});
+    // clique fora fecha a lista "+N" fixada
+    document.addEventListener('mousedown', (e) => {
+      if (tab.moreOpen && !e.target.closest('.badge-more')) {
+        tab.moreOpen = null;
+        renderGraphRows(tab);
+      }
+    });
+    els.toolbar = h('div', { class: 'toolbar' });
+    els.banner = h('div', { class: 'banner hidden' });
+    els.left = h('div', { class: 'left' });
+    els.center = h('div', { class: 'center' });
+    els.right = h('div', { class: 'right' });
+    const resizer = (panel, side) => {
+      const r = h('div', { class: 'resizer' });
+      r.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const startX = e.clientX;
+        const startW = panel.getBoundingClientRect().width;
+        const move = (ev) => {
+          const dx = ev.clientX - startX;
+          panel.style.width = Math.max(180, Math.min(700, startW + (side === 'left' ? dx : -dx))) + 'px';
+        };
+        const up = () => {
+          document.removeEventListener('mousemove', move);
+          document.removeEventListener('mouseup', up);
+          if (tab.view.type === 'graph') renderGraphRows(tab);
+        };
+        document.addEventListener('mousemove', move);
+        document.addEventListener('mouseup', up);
+      });
+      return r;
+    };
+    els.leftResizer = resizer(els.left, 'left');
+    els.rightResizer = resizer(els.right, 'right');
+    els.main = h('div', { class: 'main' }, els.left, els.leftResizer, els.center, els.rightResizer, els.right);
+    tab.page.append(els.toolbar, els.banner, els.main);
+    installRefDnD(tab, els.left);
+    installRefDnD(tab, els.center);
+    renderToolbar(tab);
+  }
+
+  // ---------- toolbar ----------
+  function tbButton(icon, label, title, onclick) {
+    return h('button', { class: 'tb-btn', title, onclick }, h('span', { class: 'ico' }, icon), label);
+  }
+
+  function renderToolbar(tab) {
+    const t = tab.els.toolbar;
+    t.innerHTML = '';
+    const head = tab.data.head || {};
+    const current = head.detached ? `HEAD (${head.sha})` : head.branch || '—';
+    const localCur = (tab.data.refs?.local || []).find((b) => b.current);
+    const pullBtn = tbButton('⇣', 'Pull' + (localCur?.behind ? ` (${localCur.behind})` : ''), 'Pull (clique direito para opções)', () => tab.pull());
+    // três grupos: identificação à esquerda, comandos centralizados, busca à direita
+    const left = h('div', { class: 'tb-left' });
+    const center = h('div', { class: 'tb-center' });
+    const right = h('div', { class: 'tb-right' });
+    t.append(left, center, right);
+    left.append(
+      h('div', { class: 'repo-label', title: tab.repo.root }, h('span', { class: 'lbl' }, 'repositório'), h('span', { class: 'val' }, tab.repo.name)),
+      h(
+        'div',
+        {
+          class: 'repo-label link',
+          title: 'Trocar de branch',
+          style: { cursor: 'pointer' },
+          onclick: () => tab.app.paletteBranches(tab),
+        },
+        h('span', { class: 'lbl' }, 'branch'),
+        h('span', { class: 'val' }, '⎇ ', current)
+      )
+    );
+    center.append(
+      tbButton('↶', 'Desfazer', 'Desfazer último commit (mantém alterações)', () => tab.undoCommit()),
+      h('div', { class: 'tb-sep' }),
+      pullBtn,
+      tbButton('⇡', 'Push' + (localCur?.ahead ? ` (${localCur.ahead})` : ''), 'Push', () => tab.push()),
+      tbButton('⟳', 'Fetch', 'Fetch de todos os remotos (Ctrl+L)', () => tab.fetch()),
+      h('div', { class: 'tb-sep' }),
+      tbButton('⑂', 'Branch', 'Nova branch (Ctrl+B)', () => tab.createBranch()),
+      tbButton('⤓', 'Stash', 'Guardar alterações no stash', () => tab.stash()),
+      tbButton('⤒', 'Pop', 'Aplicar e remover o último stash', () => tab.stashPop()),
+      h('div', { class: 'tb-sep' }),
+      tbButton('▤', 'Terminal', 'Abrir terminal externo nesta pasta', () => window.polvo.terminal(tab.repo.root)),
+      tbButton('📁', 'Pasta', 'Abrir no gerenciador de arquivos', () => window.polvo.reveal(tab.repo.root))
+    );
+    pullBtn.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, [
+        { label: 'Pull (merge se necessário)', action: () => tab.pull('merge') },
+        { label: 'Pull (somente fast-forward)', action: () => tab.pull('ff-only') },
+        { label: 'Pull (rebase)', action: () => tab.pull('rebase') },
+      ]);
+    });
+    if (tab.busy) right.append(h('div', { class: 'busy' }, h('div', { class: 'spinner' }), tab.busy));
+    const search = h('input', { class: 'search', placeholder: 'Buscar commits (Ctrl+F)', spellcheck: 'false' });
+    search.value = tab.search || '';
+    search.addEventListener('input', () => {
+      tab.setSearch(search.value);
+    });
+    search.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') tab.nextMatch(e.shiftKey ? -1 : 1);
+      if (e.key === 'Escape') {
+        search.value = '';
+        tab.setSearch('');
+        search.blur();
+      }
+    });
+    tab.els.search = search;
+    right.append(search);
+  }
+
+  function renderBanner(tab) {
+    const b = tab.els.banner;
+    const st = tab.data.state;
+    if (!st || st === 'clean') {
+      b.classList.add('hidden');
+      return;
+    }
+    const names = { merge: 'Merge', rebase: 'Rebase', 'cherry-pick': 'Cherry-pick', revert: 'Revert' };
+    b.innerHTML = '';
+    b.classList.remove('hidden');
+    const nConf = tab.data.status?.conflicts.length || 0;
+    b.append(
+      ...[
+      h('span', {}, `⚠ ${names[st]} em andamento`, nConf ? ` — ${nConf} arquivo(s) em conflito` : ' — sem conflitos pendentes'),
+      h('span', { class: 'spacer', style: { flex: 1 } }),
+      st !== 'merge' ? h('button', { class: 'btn small', onclick: () => tab.sequencer('continue') }, 'Continuar') : null,
+      st === 'rebase' ? h('button', { class: 'btn small', onclick: () => tab.sequencer('skip') }, 'Pular commit') : null,
+      h('button', { class: 'btn small danger', onclick: () => tab.sequencer('abort') }, 'Abortar'),
+      ].filter(Boolean)
+    );
+  }
+
+  // ---------- painel esquerdo ----------
+  function section(tab, key, title, count, items, extraHead) {
+    const collapsed = tab.collapsed[key];
+    const sec = h('div', { class: 'sec' + (collapsed ? ' collapsed' : '') });
+    sec.append(
+      h(
+        'div',
+        {
+          class: 'sec-head',
+          onclick: () => {
+            tab.collapsed[key] = !tab.collapsed[key];
+            sec.classList.toggle('collapsed');
+          },
+        },
+        h('span', { class: 'caret' }, '▾'),
+        title,
+        h('span', { class: 'count' }, `(${count})`),
+        h('span', { class: 'grow' }),
+        extraHead
+      ),
+      h('div', { class: 'sec-body' }, items)
+    );
+    return sec;
+  }
+
+  function renderLeft(tab) {
+    const L = tab.els.left;
+    const prevScroll = L.querySelector('.sections')?.scrollTop || 0;
+    L.innerHTML = '';
+    const filter = h('input', { class: 'filter', placeholder: 'Filtrar (Ctrl+Alt+F)', spellcheck: 'false' });
+    filter.value = tab.leftFilter || '';
+    filter.addEventListener('input', () => {
+      tab.leftFilter = filter.value;
+      renderLeft(tab);
+      const f = tab.els.left.querySelector('.filter');
+      f.focus();
+      f.setSelectionRange(f.value.length, f.value.length);
+    });
+    tab.els.leftFilter = filter;
+    const q = (tab.leftFilter || '').toLowerCase();
+    const match = (s) => !q || s.toLowerCase().includes(q);
+    const { refs, stashes } = tab.data;
+    if (!refs) return L.append(filter);
+
+    const local = refs.local.filter((b) => match(b.name));
+    const localItems = local.map((b) =>
+      h(
+        'div',
+        {
+          class: 'ref-item' + (b.current ? ' current' : ''),
+          draggable: 'true',
+          'data-ref': 'local:' + b.name,
+          title: b.upstream ? `${b.name} → ${b.upstream}` : b.name,
+          onclick: () => tab.selectSha(b.sha),
+          ondblclick: () => tab.checkout(b.name),
+          oncontextmenu: (e) => {
+            e.preventDefault();
+            showMenu(e.clientX, e.clientY, tab.branchMenu(b.name));
+          },
+        },
+        h('span', {}, b.current ? '✔' : '⑂'),
+        h('span', { class: 'name' }, b.name),
+        h(
+          'span',
+          { class: 'track' },
+          b.gone ? h('span', { class: 'gone', title: 'upstream removido' }, '✕') : null,
+          b.behind ? `↓${b.behind} ` : '',
+          b.ahead ? `↑${b.ahead}` : ''
+        )
+      )
+    );
+
+    const remoteItems = [];
+    let remoteCount = 0;
+    for (const [remote, list] of Object.entries(refs.remotes)) {
+      const shown = list.filter((b) => match(b.full));
+      remoteCount += shown.length;
+      if (!shown.length && q) continue;
+      const key = 'remote:' + remote;
+      const groupCollapsed = tab.collapsed[key];
+      remoteItems.push(
+        h(
+          'div',
+          {
+            class: 'ref-item',
+            onclick: () => {
+              tab.collapsed[key] = !groupCollapsed;
+              renderLeft(tab);
+            },
+            oncontextmenu: (e) => {
+              e.preventDefault();
+              showMenu(e.clientX, e.clientY, tab.remoteMenu(remote));
+            },
+          },
+          h('span', {}, groupCollapsed ? '▸' : '▾'),
+          h('span', { class: 'name' }, '☁ ' + remote)
+        )
+      );
+      if (!groupCollapsed) {
+        for (const b of shown) {
+          remoteItems.push(
+            h(
+              'div',
+              {
+                class: 'ref-item sub',
+                draggable: 'true',
+                'data-ref': 'remote:' + b.full,
+                onclick: () => tab.selectSha(b.sha),
+                ondblclick: () => tab.checkoutRemote(b.full),
+                oncontextmenu: (e) => {
+                  e.preventDefault();
+                  showMenu(e.clientX, e.clientY, tab.remoteBranchMenu(remote, b.name));
+                },
+              },
+              h('span', { class: 'name' }, b.name)
+            )
+          );
+        }
+      }
+    }
+
+    const tags = refs.tags.filter((t) => match(t.name));
+    const tagItems = tags.map((t) =>
+      h(
+        'div',
+        {
+          class: 'ref-item',
+          onclick: () => tab.selectSha(t.sha),
+          oncontextmenu: (e) => {
+            e.preventDefault();
+            showMenu(e.clientX, e.clientY, tab.tagMenu(t.name));
+          },
+        },
+        h('span', {}, '🏷'),
+        h('span', { class: 'name' }, t.name)
+      )
+    );
+
+    const st = (stashes || []).filter((s) => match(s.msg));
+    const stashItems = st.map((s) =>
+      h(
+        'div',
+        {
+          class: 'ref-item',
+          title: s.ref,
+          onclick: () => tab.selectStash(s),
+          oncontextmenu: (e) => {
+            e.preventDefault();
+            showMenu(e.clientX, e.clientY, tab.stashMenu(s));
+          },
+        },
+        h('span', {}, '⤓'),
+        h('span', { class: 'name' }, s.msg)
+      )
+    );
+
+    const add = (title, fn) =>
+      h(
+        'button',
+        {
+          class: 'icon-btn',
+          title,
+          onclick: (e) => {
+            e.stopPropagation();
+            fn();
+          },
+        },
+        '+'
+      );
+
+    const sections = h(
+      'div',
+      { class: 'sections' },
+      section(tab, 'local', 'Local', local.length, localItems, add('Nova branch', () => tab.createBranch())),
+      section(tab, 'remote', 'Remoto', remoteCount, remoteItems, add('Adicionar remoto', () => tab.addRemote())),
+      section(tab, 'tags', 'Tags', tags.length, tagItems, add('Nova tag no HEAD', () => tab.createTag('HEAD'))),
+      section(tab, 'stashes', 'Stashes', st.length, stashItems)
+    );
+    L.append(filter, sections);
+    sections.scrollTop = prevScroll;
+  }
+
+  // ---------- grafo ----------
+  const laneX = (i) => i * LW + LW / 2 + 5;
+
+  // Desenha as linhas de uma linha do grafo. O nó de commits comuns é a foto do
+  // autor (elemento HTML sobreposto, ver nodeAvatar); merges viram um ponto.
+  function rowSvg(g, maxLanes, opts = {}) {
+    const W = Math.max(graphWidth(maxLanes), opts.colWidth || 0);
+    const H = ROW_H;
+    const mid = H / 2;
+    const X = laneX;
+    const xc = X(g.col);
+    const color = laneColor(g.col);
+    const s = svg('svg', { width: W, height: H });
+    if (opts.wip) {
+      if (g.lineDown) s.append(svg('line', { x1: xc, y1: mid + NODE / 2, x2: xc, y2: H, stroke: color, 'stroke-width': 2, 'stroke-dasharray': '3 3' }));
+      s.append(svg('circle', { cx: xc, cy: mid, r: NODE / 2 - 1, fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-dasharray': '3 2.5' }));
+      return s;
+    }
+    // faixa translúcida da cor da linha, do nó até a mensagem
+    s.append(svg('rect', { x: xc, y: 3, width: Math.max(0, W - xc), height: H - 6, fill: color, opacity: opts.selected ? 0.45 : 0.16 }));
+    if (opts.hasRefs) s.append(svg('line', { x1: 0, y1: mid, x2: xc, y2: mid, stroke: color, 'stroke-width': 1.5 }));
+    else if (opts.ghost) s.append(svg('line', { class: 'ghost-line', x1: 0, y1: mid, x2: xc, y2: mid, stroke: color, 'stroke-width': 1.5, 'stroke-dasharray': '2 2' }));
+    for (const i of g.pass) s.append(svg('line', { x1: X(i), y1: 0, x2: X(i), y2: H, stroke: laneColor(i), 'stroke-width': 2 }));
+    // Cantos arredondados: trecho reto + arco de raio fixo só na dobra.
+    const R = (dx) => Math.min(CORNER, Math.abs(dx), mid);
+    const edge = (d, color) => s.append(svg('path', { d, stroke: color, 'stroke-width': 2, fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+    for (const i of g.incoming) {
+      if (i === g.col) {
+        edge(`M ${xc} 0 L ${xc} ${mid}`, laneColor(i));
+        continue;
+      }
+      // desce pela linha i e vira na horizontal até o nó
+      const xi = X(i);
+      const r = R(xc - xi);
+      const dir = Math.sign(xc - xi);
+      edge(`M ${xi} 0 L ${xi} ${mid - r} A ${r} ${r} 0 0 ${dir < 0 ? 1 : 0} ${xi + dir * r} ${mid} L ${xc} ${mid}`, laneColor(i));
+    }
+    for (const j of g.parentCols) {
+      if (j === g.col) {
+        edge(`M ${xc} ${mid} L ${xc} ${H}`, laneColor(j));
+        continue;
+      }
+      // sai do nó na horizontal e dobra para baixo na linha j
+      const xj = X(j);
+      const r = R(xj - xc);
+      const dir = Math.sign(xj - xc);
+      edge(`M ${xc} ${mid} L ${xj - dir * r} ${mid} A ${r} ${r} 0 0 ${dir > 0 ? 1 : 0} ${xj} ${mid + r} L ${xj} ${H}`, laneColor(j));
+    }
+    if (g.isMerge) s.append(svg('circle', { cx: xc, cy: mid, r: 5, fill: color }));
+    else s.append(svg('circle', { cx: xc, cy: mid, r: NODE / 2 + 2, fill: color }));
+    return s;
+  }
+
+  function nodeAvatar(tab, c, g) {
+    const el = avatar(c.author, c.email, false, tab.avatarCtx(c.sha));
+    el.classList.add('node-avatar');
+    el.style.left = laneX(g.col) - NODE / 2 + 'px';
+    el.style.top = (ROW_H - NODE) / 2 + 'px';
+    return el;
+  }
+
+  // Etiqueta esmaecida com a branch da linha, visível no hover/seleção.
+  function ghostBadge(tab, owner, col) {
+    if (!owner) return null;
+    const color = laneColor(col);
+    const refs = tab.data.refs || { local: [], remotes: {} };
+    const isLocal = refs.local.some((b) => b.name === owner);
+    const isRemote = Object.values(refs.remotes).some((list) => list.some((b) => b.name === owner));
+    const isHead = tab.data.head && tab.data.head.branch === owner;
+    return h(
+      'span',
+      {
+        class: 'badge ghost',
+        style: { background: `color-mix(in srgb, ${color} 22%, var(--bg))` },
+        title: isLocal || isRemote ? `Commit na linha da branch ${owner}` : `Commit na linha da branch ${owner} (já removida)`,
+      },
+      isHead ? '✓ ' : '',
+      h('span', { class: 'bname' }, owner),
+      isLocal ? icon(ICON_LAPTOP) : null,
+      isRemote ? icon(ICON_CLOUD) : null
+    );
+  }
+
+  function refBadges(tab, c, col) {
+    const color = laneColor(col);
+    const locals = new Set(c.refs.filter((r) => r.type === 'local' || r.type === 'head').map((r) => r.name));
+    const out = [];
+    for (const r of c.refs) {
+      if (r.type === 'remote') {
+        const short = r.name.slice(r.name.indexOf('/') + 1);
+        if (locals.has(short)) continue; // já representado no badge local
+        out.push(
+          h(
+            'span',
+            {
+              class: 'badge remote',
+              draggable: 'true',
+              'data-ref': 'remote:' + r.name,
+              style: { background: `color-mix(in srgb, ${color} 35%, var(--bg))` },
+              title: r.name,
+              ondblclick: () => tab.checkoutRemote(r.name),
+              oncontextmenu: (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const slash = r.name.indexOf('/');
+                showMenu(e.clientX, e.clientY, tab.remoteBranchMenu(r.name.slice(0, slash), r.name.slice(slash + 1)));
+              },
+            },
+            h('span', { class: 'bname' }, r.name.slice(r.name.indexOf('/') + 1)),
+            icon(ICON_CLOUD)
+          )
+        );
+      } else if (r.type === 'tag') {
+        out.push(
+          h(
+            'span',
+            {
+              class: 'badge tag',
+              title: 'tag ' + r.name,
+              oncontextmenu: (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                showMenu(e.clientX, e.clientY, tab.tagMenu(r.name));
+              },
+            },
+            icon(ICON_TAG),
+            r.name
+          )
+        );
+      } else if (r.type === 'detached') {
+        out.push(h('span', { class: 'badge head', style: { background: color } }, 'HEAD'));
+      } else {
+        const hasRemote = c.refs.some((x) => x.type === 'remote' && x.name.endsWith('/' + r.name));
+        out.push(
+          h(
+            'span',
+            {
+              class: 'badge ' + (r.type === 'head' ? 'head' : 'local'),
+              draggable: 'true',
+              'data-ref': 'local:' + r.name,
+              style: { background: `color-mix(in srgb, ${color} ${r.type === 'head' ? 62 : 35}%, var(--bg))` },
+              title: r.name + (hasRemote ? ' (sincronizada com remoto)' : ''),
+              ondblclick: () => tab.checkout(r.name),
+              oncontextmenu: (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                showMenu(e.clientX, e.clientY, tab.branchMenu(r.name));
+              },
+            },
+            r.type === 'head' ? '✓ ' : '',
+            h('span', { class: 'bname' }, r.name),
+            icon(ICON_LAPTOP),
+            hasRemote ? icon(ICON_CLOUD) : null
+          )
+        );
+      }
+    }
+    if (out.length <= 1) return out;
+    // mostra a primeira (a atual vem antes) e "+N" com as demais no hover
+    out.sort((a, b) => b.classList.contains('head') - a.classList.contains('head'));
+    const [first, ...rest] = out;
+    return [
+      first,
+      h(
+        'span',
+        {
+          class: 'badge-more' + (tab.moreOpen === c.sha ? ' open' : ''),
+          title: 'Clique para fixar a lista aberta',
+          // clicar fixa a lista aberta (o hover sozinho fecha ao mover o mouse)
+          onmousedown: (e) => e.stopPropagation(),
+          onclick: (e) => {
+            if (e.target.closest('.more-pop')) return;
+            e.stopPropagation();
+            tab.moreOpen = tab.moreOpen === c.sha ? null : c.sha;
+            renderGraphRows(tab);
+          },
+        },
+        `+${rest.length}`,
+        h('div', { class: 'more-pop' }, rest)
+      ),
+    ];
+  }
+
+  // Larguras das colunas Branch/Tag e Grafo: ajustáveis arrastando o cabeçalho,
+  // salvas nas configurações. O grafo é recortado quando há mais linhas que cabem.
+  const colPrefs = { refs: null, graph: null, show: { author: false, date: false, sha: false } };
+  const OPTIONAL_COLS = [
+    ['author', 'Autor'],
+    ['date', 'Data'],
+    ['sha', 'SHA'],
+  ];
+
+  function setColumnPrefs(prefs) {
+    const show = { ...colPrefs.show, ...((prefs && prefs.show) || {}) };
+    Object.assign(colPrefs, prefs || {}, { show });
+  }
+
+  function columnsMenu(tab, e) {
+    showMenu(
+      e.clientX,
+      e.clientY,
+      OPTIONAL_COLS.map(([key, label]) => ({
+        label: (colPrefs.show[key] ? '✓ ' : '\u2003') + label,
+        action: () => {
+          colPrefs.show[key] = !colPrefs.show[key];
+          window.polvo.settings.set({ columns: { ...colPrefs } });
+          renderGraph(tab);
+        },
+      }))
+    );
+  }
+
+  function columnWidths(tab) {
+    return {
+      refs: colPrefs.refs || 170,
+      graph: colPrefs.graph || Math.min(graphWidth(tab.layout.maxLanes), 200),
+    };
+  }
+
+  function applyColumnWidths(tab) {
+    const w = columnWidths(tab);
+    tab.els.center.style.setProperty('--refs-w', w.refs + 'px');
+    tab.els.center.style.setProperty('--graph-w', w.graph + 'px');
+    for (const [key] of OPTIONAL_COLS) tab.els.center.classList.toggle('hide-' + key, !colPrefs.show[key]);
+    return w;
+  }
+
+  function colResizer(tab, key) {
+    const r = h('div', { class: 'col-resize', title: 'Arraste para ajustar a largura' });
+    r.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const start = columnWidths(tab)[key];
+      const min = key === 'refs' ? 60 : 40;
+      const move = (ev) => {
+        colPrefs[key] = Math.max(min, Math.min(600, start + ev.clientX - startX));
+        applyColumnWidths(tab);
+        renderGraphRows(tab);
+      };
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        window.polvo.settings.set({ columns: { ...colPrefs } });
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
+    r.addEventListener('dblclick', () => {
+      colPrefs[key] = null;
+      applyColumnWidths(tab);
+      renderGraphRows(tab);
+      window.polvo.settings.set({ columns: { ...colPrefs } });
+    });
+    return r;
+  }
+
+  function renderGraph(tab) {
+    const C = tab.els.center;
+    C.innerHTML = '';
+    const items = tab.rowItems();
+    if (!items.length) {
+      C.append(h('div', { class: 'empty' }, 'Este repositório ainda não tem commits. Faça o primeiro commit pelo painel à direita.'));
+      return;
+    }
+    applyColumnWidths(tab);
+    const head = h(
+      'div',
+      { class: 'graph-head' },
+      h('div', { class: 'col-refs head-cell' }, 'Branch / Tag', colResizer(tab, 'refs')),
+      h('div', { class: 'col-graph head-cell' }, 'Grafo', colResizer(tab, 'graph')),
+      h('div', { class: 'col-msg head-cell' }, 'Mensagem do commit'),
+      h('div', { class: 'col-author' }, 'Autor'),
+      h('div', { class: 'col-date' }, 'Data'),
+      h('div', { class: 'col-sha' }, 'SHA'),
+      h('button', { class: 'icon-btn cols-btn', title: 'Escolher colunas', onclick: (e) => columnsMenu(tab, e) }, '⚙')
+    );
+    const scroll = h('div', { class: 'graph-scroll', tabindex: '0' });
+    const inner = h('div', { class: 'graph-inner', style: { height: items.length * ROW_H + 'px' } });
+    scroll.append(inner);
+    scroll.addEventListener('scroll', () => renderGraphRows(tab));
+    C.append(head, scroll);
+    tab.els.graphScroll = scroll;
+    tab.els.graphInner = inner;
+    scroll.scrollTop = tab.graphScrollTop || 0;
+    renderGraphRows(tab);
+  }
+
+  function renderGraphRows(tab) {
+    const scroll = tab.els.graphScroll;
+    const inner = tab.els.graphInner;
+    if (!scroll || !inner || !inner.isConnected) return;
+    tab.graphScrollTop = scroll.scrollTop;
+    const items = tab.rowItems();
+    const first = Math.max(0, Math.floor(scroll.scrollTop / ROW_H) - 8);
+    const last = Math.min(items.length, Math.ceil((scroll.scrollTop + scroll.clientHeight) / ROW_H) + 8);
+    const gw = applyColumnWidths(tab).graph;
+    const q = (tab.search || '').trim().toLowerCase();
+    inner.innerHTML = '';
+    for (let i = first; i < last; i++) {
+      const it = items[i];
+      let row;
+      if (it.type === 'wip') {
+        const st = tab.data.status;
+        const n = st.staged.length + st.unstaged.length + st.conflicts.length;
+        row = h(
+          'div',
+          { class: 'g-row wip-row' + (tab.selected === 'WIP' ? ' selected' : ''), style: { top: i * ROW_H + 'px' }, onclick: () => tab.select('WIP') },
+          h('div', { class: 'col-refs' }),
+          h('div', { class: 'col-graph' }, rowSvg(it.g, tab.layout.maxLanes, { wip: true, colWidth: gw })),
+          h('div', { class: 'col-msg' }, `// WIP — ${n} arquivo(s) alterado(s)`),
+          h('div', { class: 'col-author' }),
+          h('div', { class: 'col-date' }),
+          h('div', { class: 'col-sha' })
+        );
+      } else {
+        const c = it.c;
+        const hit = q && it.searchText.includes(q);
+        row = h(
+          'div',
+          {
+            class: 'g-row' + (tab.selected === c.sha ? ' selected' : '') + (q ? (hit ? ' match' : ' dimmed') : ''),
+            style: { top: i * ROW_H + 'px' },
+            onclick: () => tab.select(c.sha),
+            oncontextmenu: (e) => {
+              e.preventDefault();
+              tab.select(c.sha);
+              showMenu(e.clientX, e.clientY, tab.commitMenu(c));
+            },
+          },
+          h(
+            'div',
+            { class: 'col-refs' },
+            c.refs.length ? refBadges(tab, c, it.g.col) : ghostBadge(tab, it.owner, it.g.col),
+            c.refs.length || it.owner ? h('span', { class: 'ref-line' + (c.refs.length ? '' : ' ghost'), style: { background: laneColor(it.g.col) } }) : null
+          ),
+          h(
+            'div',
+            { class: 'col-graph' },
+            rowSvg(it.g, tab.layout.maxLanes, { hasRefs: c.refs.length > 0, ghost: !c.refs.length && !!it.owner, selected: tab.selected === c.sha, colWidth: gw }),
+            it.g.isMerge ? null : nodeAvatar(tab, c, it.g)
+          ),
+          h(
+            'div',
+            { class: 'col-msg', title: c.bodyLine ? `${c.subject}\n\n${c.bodyLine}` : c.subject, style: { borderLeftColor: laneColor(it.g.col) } },
+            c.subject,
+            c.bodyLine ? h('span', { class: 'msg-body' }, c.bodyLine) : null
+          ),
+          h('div', { class: 'col-author' }, avatar(c.author, c.email, false, tab.avatarCtx(c.sha)), h('span', { class: 'ellip' }, c.author)),
+          h('div', { class: 'col-date', title: fullDate(c.date) }, relDate(c.date)),
+          h('div', { class: 'col-sha mono' }, c.sha.slice(0, 7))
+        );
+      }
+      inner.append(row);
+    }
+  }
+
+  function scrollToRow(tab, index) {
+    const scroll = tab.els.graphScroll;
+    if (!scroll) return;
+    const top = index * ROW_H;
+    if (top < scroll.scrollTop) scroll.scrollTop = top;
+    else if (top + ROW_H > scroll.scrollTop + scroll.clientHeight) scroll.scrollTop = top - scroll.clientHeight + ROW_H * 3;
+    renderGraphRows(tab);
+  }
+
+  // ---------- painel direito ----------
+  function fileRow(file, { onclick, actions, selected, oncontextmenu }) {
+    return h(
+      'div',
+      { class: 'file-row' + (selected ? ' selected' : ''), onclick, oncontextmenu, title: file.from ? `${file.from} → ${file.path}` : file.path },
+      file.status ? statusIcon(file.status) : h('span', { class: 'sti' }),
+      file.label ? h('span', { class: 'fpath' }, h('span', { class: 'fname' }, file.label)) : pathLabel(file.path),
+      actions ? h('span', { class: 'fact' }, actions) : null
+    );
+  }
+
+  // Agrupa caminhos em pastas; pastas recolhíveis, estado guardado na aba.
+  function renderTree(tab, container, files, sel, open) {
+    const root = { dirs: new Map(), files: [] };
+    for (const f of files) {
+      const parts = f.path.split('/');
+      let node = root;
+      for (const part of parts.slice(0, -1)) {
+        if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: [] });
+        node = node.dirs.get(part);
+      }
+      node.files.push({ ...f, label: parts[parts.length - 1] });
+    }
+    const walk = (node, prefix, depth) => {
+      for (const [name, child] of node.dirs) {
+        // compacta pastas com um único filho: "src/main/java"
+        let label = name;
+        let cur = child;
+        while (cur.files.length === 0 && cur.dirs.size === 1) {
+          const [n2, c2] = [...cur.dirs][0];
+          label += '/' + n2;
+          cur = c2;
+        }
+        const key = prefix + label;
+        const collapsed = tab.treeCollapsed.has(key);
+        container.append(
+          h(
+            'div',
+            {
+              class: 'file-row tree-dir',
+              style: { paddingLeft: 8 + depth * 14 + 'px' },
+              onclick: () => {
+                if (collapsed) tab.treeCollapsed.delete(key);
+                else tab.treeCollapsed.add(key);
+                renderRight(tab);
+              },
+            },
+            h('span', { class: 'caret' }, collapsed ? '▸' : '▾'),
+            h('span', { class: 'bi folder', html: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M1.5 4h5l1.5 1.5h6.5v7.5h-13z" fill="currentColor"/></svg>' }),
+            h('span', { class: 'fname' }, label)
+          )
+        );
+        if (!collapsed) walk(cur, key + '/', depth + 1);
+      }
+      for (const f of node.files) {
+        const row = fileRow(f, { selected: sel === f.path, onclick: () => open(f) });
+        row.style.paddingLeft = 8 + depth * 14 + 'px';
+        container.append(row);
+      }
+    };
+    walk(root, '', 0);
+  }
+
+  function renderRight(tab) {
+    const R = tab.els.right;
+    // preserva foco/cursor do campo de commit quando o painel é redesenhado
+    const active = document.activeElement;
+    // só os campos de texto da mensagem (não botão nem checkbox)
+    const focusKey = active && R.contains(active) && active.dataset ? active.dataset.field : null;
+    const caret = focusKey ? [active.selectionStart, active.selectionEnd] : null;
+    const scrollTop = R.querySelector('.panel-scroll')?.scrollTop || 0;
+    R.innerHTML = '';
+    if (tab.selected === 'WIP') {
+      renderWip(tab, R);
+      const sc = R.querySelector('.panel-scroll');
+      if (sc) sc.scrollTop = scrollTop;
+      if (focusKey) {
+        const el = R.querySelector(`[data-field="${focusKey}"]`);
+        if (el) {
+          el.focus();
+          if (caret[0] != null) el.setSelectionRange(caret[0], caret[1]);
+        }
+      }
+      return;
+    }
+    if (tab.selectedDetails) return renderCommit(tab, R, tab.selectedDetails);
+    R.append(h('div', { class: 'empty' }, 'Carregando...'));
+  }
+
+  function renderWip(tab, R) {
+    const st = tab.data.status;
+    const sel = tab.view.type !== 'graph' ? tab.view : {};
+    const scrollBox = h('div', { class: 'panel-scroll' });
+    const isSel = (kind, p) => sel.file === p && (sel.kind === kind || (kind === 'unstaged' && sel.kind === 'untracked'));
+
+    if (st.conflicts.length) {
+      scrollBox.append(
+        h('h4', {}, `Conflitos (${st.conflicts.length})`),
+        h(
+          'div',
+          { class: 'file-list' },
+          st.conflicts.map((f) =>
+            fileRow(
+              { ...f, status: 'U' },
+              {
+                selected: sel.type === 'conflict' && sel.file === f.path,
+                onclick: () => tab.openConflict(f.path),
+                oncontextmenu: (e) => {
+                  e.preventDefault();
+                  showMenu(e.clientX, e.clientY, [
+                    { label: 'Resolver...', action: () => tab.openConflict(f.path) },
+                    { label: 'Usar a minha versão (ours)', action: () => tab.resolveWith(f.path, 'ours') },
+                    { label: 'Usar a versão deles (theirs)', action: () => tab.resolveWith(f.path, 'theirs') },
+                    { label: 'Marcar como resolvido', action: () => tab.stage([f.path]) },
+                  ]);
+                },
+                actions: h(
+                  'button',
+                  {
+                    class: 'btn small',
+                    onclick: (e) => {
+                      e.stopPropagation();
+                      tab.stage([f.path]);
+                    },
+                  },
+                  'Resolvido'
+                ),
+              }
+            )
+          )
+        )
+      );
+    }
+
+    scrollBox.append(
+      h(
+        'h4',
+        {},
+        `Não preparados (${st.unstaged.length})`,
+        h('span', { class: 'grow' }),
+        st.unstaged.length ? h('button', { class: 'btn small danger', onclick: () => tab.discardAll() }, 'Descartar tudo') : null,
+        st.unstaged.length ? h('button', { class: 'btn small', onclick: () => tab.stageAll() }, 'Stage em tudo') : null
+      ),
+      h(
+        'div',
+        { class: 'file-list' },
+        st.unstaged.length
+          ? st.unstaged.map((f) =>
+              fileRow(f, {
+                selected: isSel('unstaged', f.path),
+                onclick: () => tab.openDiff(f.untracked ? 'untracked' : 'unstaged', f.path),
+                oncontextmenu: (e) => {
+                  e.preventDefault();
+                  showMenu(e.clientX, e.clientY, [
+                    { label: 'Stage', action: () => tab.stage([f.path]) },
+                    { label: 'Descartar alterações', danger: true, action: () => tab.discard(f) },
+                    '-',
+                    { label: 'Ignorar (adicionar ao .gitignore)', action: () => tab.ignore(f.path) },
+                    /\.[^./]+$/.test(f.path) && { label: `Ignorar todos os *${f.path.match(/\.[^./]+$/)[0]}`, action: () => tab.ignore('*' + f.path.match(/\.[^./]+$/)[0]) },
+                    { label: 'Copiar caminho', action: () => navigator.clipboard.writeText(f.path) },
+                  ]);
+                },
+                actions: h(
+                  'button',
+                  {
+                    class: 'btn small',
+                    onclick: (e) => {
+                      e.stopPropagation();
+                      tab.stage([f.path]);
+                    },
+                  },
+                  'Stage'
+                ),
+              })
+            )
+          : h('div', { class: 'file-row dim' }, 'Nenhuma alteração')
+      ),
+      h(
+        'h4',
+        {},
+        `Preparados (${st.staged.length})`,
+        h('span', { class: 'grow' }),
+        st.staged.length ? h('button', { class: 'btn small', onclick: () => tab.unstageAll() }, 'Unstage em tudo') : null
+      ),
+      h(
+        'div',
+        { class: 'file-list' },
+        st.staged.length
+          ? st.staged.map((f) =>
+              fileRow(f, {
+                selected: isSel('staged', f.path),
+                onclick: () => tab.openDiff('staged', f.path),
+                oncontextmenu: (e) => {
+                  e.preventDefault();
+                  showMenu(e.clientX, e.clientY, [{ label: 'Unstage', action: () => tab.unstage([f.path]) }]);
+                },
+                actions: h(
+                  'button',
+                  {
+                    class: 'btn small',
+                    onclick: (e) => {
+                      e.stopPropagation();
+                      tab.unstage([f.path]);
+                    },
+                  },
+                  'Unstage'
+                ),
+              })
+            )
+          : h('div', { class: 'file-row dim' }, 'Nada preparado para commit')
+      )
+    );
+
+    const draft = tab.commitDraft;
+    const summary = h('input', { placeholder: 'Resumo do commit', spellcheck: 'true', 'data-field': 'summary' });
+    summary.value = draft.summary;
+    const counter = h('span', { class: 'counter dim' });
+    const updateCounter = () => {
+      counter.textContent = String(72 - summary.value.length);
+      counter.classList.toggle('over', summary.value.length > 72);
+    };
+    updateCounter();
+    const desc = h('textarea', { placeholder: 'Descrição (opcional)', spellcheck: 'true', 'data-field': 'description' });
+    desc.value = draft.description;
+    const amend = h('input', { type: 'checkbox' });
+    amend.checked = draft.amend;
+    const nStaged = st.staged.length;
+    const commitBtn = h('button', { class: 'btn primary', onclick: () => tab.commit() });
+    const updateBtn = () => {
+      const can = summary.value.trim() && (nStaged || amend.checked || tab.data.state === 'merge') && !st.conflicts.length;
+      commitBtn.disabled = !can;
+      commitBtn.textContent = amend.checked ? 'Corrigir último commit (amend)' : `Commit de ${nStaged} arquivo(s)`;
+    };
+    summary.addEventListener('input', () => {
+      draft.summary = summary.value;
+      updateCounter();
+      updateBtn();
+    });
+    desc.addEventListener('input', () => {
+      draft.description = desc.value;
+    });
+    amend.addEventListener('change', async () => {
+      draft.amend = amend.checked;
+      if (amend.checked && !summary.value.trim()) {
+        const msg = await tab.lastCommitMessage();
+        const [s, ...rest] = msg.split('\n');
+        draft.summary = summary.value = s;
+        draft.description = desc.value = rest.join('\n').trim();
+        updateCounter();
+      }
+      updateBtn();
+    });
+    const ctrlEnter = (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !commitBtn.disabled) tab.commit();
+    };
+    summary.addEventListener('keydown', ctrlEnter);
+    desc.addEventListener('keydown', ctrlEnter);
+    updateBtn();
+    tab.els.commitSummary = summary;
+    const box = h(
+      'div',
+      { class: 'commit-box' },
+      h('div', { class: 'row' }, h('strong', { class: 'grow' }, 'Mensagem do commit'), counter),
+      summary,
+      desc,
+      h('label', { class: 'row dim' }, amend, 'Corrigir commit anterior (amend)'),
+      commitBtn
+    );
+    R.append(scrollBox, box);
+  }
+
+  // Faixa "N arquivo(s) alterado(s) no diretório de trabalho" mostrada no topo do
+  // painel quando um commit está selecionado e há trabalho em andamento.
+  function wipNotice(tab) {
+    const st = tab.data.status;
+    if (!st) return null;
+    const n = new Set([...st.staged, ...st.unstaged, ...st.conflicts].map((f) => f.path)).size;
+    if (!n) return null;
+    return h(
+      'div',
+      { class: 'wip-notice' },
+      h('span', {}, n === 1 ? '1 arquivo alterado no diretório de trabalho' : `${n} arquivos alterados no diretório de trabalho`),
+      h('button', { class: 'btn small outline', onclick: () => tab.select('WIP') }, 'Ver alterações')
+    );
+  }
+
+  function renderCommit(tab, R, d) {
+    const [subject, ...body] = d.message.split('\n');
+    const bodyText = body.join('\n').trim();
+    const sel = tab.view.type === 'diff' && tab.view.kind === 'commit' ? tab.view.file : null;
+    const notice = wipNotice(tab);
+    if (notice) R.append(notice);
+    R.append(
+      h(
+        'div',
+        { class: 'commit-id' },
+        'commit: ',
+        h('span', { class: 'mono link', title: 'Copiar SHA completo', onclick: () => tab.copy(d.sha) }, d.sha.slice(0, 7)),
+        h('span', { class: 'grow' }),
+        tab.selectedIsStash ? h('span', { class: 'dim' }, 'stash') : null
+      )
+    );
+    const box = h('div', { class: 'panel-scroll' });
+    const counts = {};
+    for (const f of d.files) counts[f.status] = (counts[f.status] || 0) + 1;
+    const countLabel = { A: ['adicionado', 'adicionados'], M: ['modificado', 'modificados'], D: ['removido', 'removidos'], R: ['renomeado', 'renomeados'], C: ['copiado', 'copiados'], T: ['tipo alterado', 'tipos alterados'] };
+    const sameCommitter = d.committer === d.author && +d.commitDate === +d.date;
+    const when = (dt) => `${dt.toLocaleDateString('pt-BR')} @ ${dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+    const fv = tab.fileView;
+    const listBox = h('div', { class: 'file-list tall flat' });
+    const fillList = async () => {
+      let files = d.files.map((f) => ({ ...f }));
+      if (fv.all) {
+        const all = await tab.treeFiles(d.sha);
+        const changed = new Map(files.map((f) => [f.path, f]));
+        files = all.map((p) => changed.get(p) || { path: p, status: null });
+        for (const f of d.files) if (f.status === 'D') files.push({ ...f });
+      }
+      files.sort((a, b) => (fv.desc ? -1 : 1) * a.path.localeCompare(b.path));
+      listBox.innerHTML = '';
+      const open = (f) => f.status && tab.openDiff('commit', f.path, d.sha, d.parents);
+      if (fv.mode === 'tree') renderTree(tab, listBox, files, sel, open);
+      else listBox.append(...files.map((f) => fileRow(f, { selected: sel === f.path, onclick: () => open(f) })));
+    };
+    const seg = (mode, label, svgText) =>
+      h(
+        'button',
+        {
+          class: 'seg-btn' + (fv.mode === mode ? ' active' : ''),
+          onclick: () => {
+            fv.mode = mode;
+            renderRight(tab);
+          },
+        },
+        h('span', { class: 'bi', html: svgText }),
+        label
+      );
+    const allBox = h('input', { type: 'checkbox' });
+    allBox.checked = fv.all;
+    allBox.addEventListener('change', () => {
+      fv.all = allBox.checked;
+      fillList();
+    });
+    box.append(
+      h('div', { class: 'detail-msg' }, h('div', { class: 'subject' }, subject), bodyText ? h('div', { class: 'body' }, bodyText) : null),
+      h('div', { class: 'grab' }),
+      h(
+        'div',
+        { class: 'detail-author' },
+        avatar(d.author, d.email, true, tab.avatarCtx(d.sha)),
+        h(
+          'div',
+          { class: 'grow' },
+          h('div', { class: 'author-name', title: d.email }, d.author),
+          h('div', { class: 'dim small' }, 'autoria ', h('span', { class: 'strong' }, when(d.date))),
+          sameCommitter ? null : h('div', { class: 'dim small' }, 'commit por ', d.committer, ' ', h('span', { class: 'strong' }, when(d.commitDate)))
+        ),
+        h(
+          'div',
+          { class: 'dim small parents' },
+          d.parents.length > 1 ? 'pais:' : 'pai:',
+          d.parents.length ? d.parents.map((p) => h('span', { class: 'mono link', onclick: () => tab.selectSha(p) }, p.slice(0, 6))) : ' —'
+        )
+      ),
+      h(
+        'div',
+        { class: 'file-counts' },
+        Object.entries(counts).map(([k, n]) => h('span', {}, statusIcon(k), ` ${n} ${(countLabel[k] || [k, k])[n === 1 ? 0 : 1]}`))
+      ),
+      h(
+        'div',
+        { class: 'file-tools' },
+        h(
+          'button',
+          {
+            class: 'icon-btn sort-btn',
+            title: fv.desc ? 'Ordem Z→A' : 'Ordem A→Z',
+            onclick: () => {
+              fv.desc = !fv.desc;
+              renderRight(tab);
+            },
+          },
+          fv.desc ? '↓ᶻᵃ' : '↑ᵃᶻ'
+        ),
+        h('span', { class: 'grow' }),
+        h(
+          'div',
+          { class: 'seg' },
+          seg('path', 'Caminho', '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.6"/></svg>'),
+          seg('tree', 'Árvore', '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M3 2v11h4M3 7h4" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="5" width="6" height="4" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="8" y="11" width="6" height="4" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>')
+        ),
+        h('label', { class: 'all-files' }, allBox, 'Ver todos os arquivos')
+      ),
+      listBox
+    );
+    fillList();
+    R.append(box);
+  }
+
+  // ---------- diff ----------
+  function renderDiff(tab) {
+    const C = tab.els.center;
+    const v = tab.view;
+    C.innerHTML = '';
+    const actions = [];
+    if (v.kind === 'unstaged' || v.kind === 'untracked') {
+      actions.push(h('button', { class: 'btn small danger', onclick: () => tab.discard({ path: v.file, untracked: v.kind === 'untracked' }) }, 'Descartar arquivo'));
+      actions.push(h('button', { class: 'btn small primary', onclick: () => tab.stage([v.file]) }, 'Stage arquivo'));
+    } else if (v.kind === 'staged') {
+      actions.push(h('button', { class: 'btn small', onclick: () => tab.unstage([v.file]) }, 'Unstage arquivo'));
+    }
+    const label = { unstaged: 'não preparado', untracked: 'novo arquivo', staged: 'preparado', commit: v.sha ? 'commit ' + v.sha.slice(0, 7) : '' }[v.kind];
+    C.append(
+      h(
+        'div',
+        { class: 'diff-head' },
+        h('span', { class: 'path', title: v.file }, v.file),
+        h('span', { class: 'dim' }, label),
+        actions,
+        h('button', { class: 'icon-btn', title: 'Fechar (Esc)', onclick: () => tab.closeView() }, '✕')
+      )
+    );
+    const body = h('div', { class: 'diff-body' });
+    C.append(body);
+    const files = v.files || [];
+    if (!files.length) {
+      body.append(h('div', { class: 'empty' }, v.loading ? 'Carregando...' : 'Sem diferenças de conteúdo (talvez apenas permissão ou renomeação).'));
+      return;
+    }
+    for (const f of files) {
+      if (f.binary) {
+        body.append(h('div', { class: 'empty' }, 'Arquivo binário — diff não exibido.'));
+        continue;
+      }
+      for (const hk of f.hunks) {
+        const hunkActions = [];
+        if (v.kind === 'unstaged') {
+          hunkActions.push(h('button', { class: 'btn small danger', onclick: () => tab.discardHunk(f, hk) }, 'Descartar hunk'));
+          hunkActions.push(h('button', { class: 'btn small', onclick: () => tab.stageHunk(f, hk) }, 'Stage hunk'));
+        } else if (v.kind === 'staged') {
+          hunkActions.push(h('button', { class: 'btn small', onclick: () => tab.unstageHunk(f, hk) }, 'Unstage hunk'));
+        }
+        const lines = hk.lines.map((l) =>
+          h('div', { class: 'dl ' + l.type }, h('span', { class: 'ln' }, l.old ?? ''), h('span', { class: 'ln' }, l.new ?? ''), h('span', { class: 'code' }, l.text))
+        );
+        body.append(h('div', { class: 'hunk' }, h('div', { class: 'hunk-head' }, h('span', { class: 'grow mono' }, hk.header), hunkActions), lines));
+      }
+    }
+  }
+
+  // ---------- resolução de conflitos ----------
+  function parseConflicts(text) {
+    const segs = [];
+    const lines = text.split('\n');
+    let buf = [];
+    let cur = null;
+    for (const line of lines) {
+      if (!cur && line.startsWith('<<<<<<<')) {
+        if (buf.length) segs.push({ type: 'text', text: buf.join('\n') });
+        buf = [];
+        cur = { type: 'conflict', oursLabel: line.slice(8), ours: [], base: null, theirs: [], theirsLabel: '', stage: 'ours' };
+      } else if (cur && line.startsWith('|||||||')) {
+        cur.stage = 'base';
+        cur.base = [];
+      } else if (cur && line.startsWith('=======')) {
+        cur.stage = 'theirs';
+      } else if (cur && line.startsWith('>>>>>>>')) {
+        cur.theirsLabel = line.slice(8);
+        segs.push(cur);
+        cur = null;
+      } else if (cur) {
+        cur[cur.stage].push(line);
+      } else buf.push(line);
+    }
+    if (cur) buf.unshift(...['<<<<<<< ' + cur.oursLabel, ...cur.ours, '=======', ...cur.theirs]);
+    segs.push({ type: 'text', text: buf.join('\n') });
+    return segs;
+  }
+
+  function assemble(segs) {
+    return segs
+      .map((s) => {
+        if (s.type === 'text') return s.text;
+        if (s.choice === 'ours') return s.ours.join('\n');
+        if (s.choice === 'theirs') return s.theirs.join('\n');
+        if (s.choice === 'both') return [...s.ours, ...s.theirs].join('\n');
+        if (s.choice === 'both-rev') return [...s.theirs, ...s.ours].join('\n');
+        return ['<<<<<<< ' + s.oursLabel, ...s.ours, '=======', ...s.theirs, '>>>>>>> ' + s.theirsLabel].join('\n');
+      })
+      .join('\n');
+  }
+
+  function renderConflict(tab) {
+    const C = tab.els.center;
+    const v = tab.view;
+    C.innerHTML = '';
+    if (v.content == null) {
+      C.append(h('div', { class: 'empty' }, 'Não foi possível ler o arquivo (binário ou removido). Use "ours"/"theirs" no menu do arquivo.'));
+      return;
+    }
+    const segs = v.segs || (v.segs = parseConflicts(v.content));
+    const output = h('textarea', { spellcheck: 'false' });
+    const refresh = () => {
+      output.value = assemble(segs);
+    };
+    const blocks = h('div', { class: 'conflict-blocks' });
+    const conflicts = segs.filter((s) => s.type === 'conflict');
+    conflicts.forEach((s, idx) => {
+      const choose = (c) => {
+        s.choice = c;
+        renderConflict(tab);
+      };
+      blocks.append(
+        h(
+          'div',
+          { class: 'cblock' + (s.choice ? ' done' : '') },
+          h(
+            'div',
+            { class: 'cb-head' },
+            h('strong', { class: 'grow' }, `Conflito ${idx + 1} de ${conflicts.length}`, s.choice ? ` — escolhido: ${s.choice}` : ''),
+            h('button', { class: 'btn small', onclick: () => choose('ours') }, 'Usar meu'),
+            h('button', { class: 'btn small', onclick: () => choose('theirs') }, 'Usar deles'),
+            h('button', { class: 'btn small', onclick: () => choose('both') }, 'Ambos'),
+            s.choice ? h('button', { class: 'btn small', onclick: () => choose(null) }, 'Desfazer') : null
+          ),
+          h('div', { class: 'cb-head dim' }, 'Meu: ', s.oursLabel || 'HEAD'),
+          h('div', { class: 'side ours' }, s.ours.join('\n') || ' '),
+          h('div', { class: 'cb-head dim' }, 'Deles: ', s.theirsLabel),
+          h('div', { class: 'side theirs' }, s.theirs.join('\n') || ' ')
+        )
+      );
+    });
+    if (!conflicts.length) blocks.append(h('div', { class: 'empty' }, 'Nenhum marcador de conflito encontrado. Revise o resultado abaixo e salve.'));
+    refresh();
+    C.append(
+      h(
+        'div',
+        { class: 'diff-head' },
+        h('span', { class: 'path' }, '⚠ ', v.file),
+        h('button', { class: 'btn small', onclick: () => tab.resolveWith(v.file, 'ours') }, 'Arquivo inteiro: meu'),
+        h('button', { class: 'btn small', onclick: () => tab.resolveWith(v.file, 'theirs') }, 'Arquivo inteiro: deles'),
+        h('button', { class: 'icon-btn', title: 'Fechar (Esc)', onclick: () => tab.closeView() }, '✕')
+      ),
+      h(
+        'div',
+        { class: 'conflict-body' },
+        blocks,
+        h(
+          'div',
+          { class: 'conflict-output' },
+          h('div', { class: 'row', style: { display: 'flex', alignItems: 'center', gap: '8px' } }, h('strong', { style: { flex: 1 } }, 'Resultado (editável)'), h('button', { class: 'btn primary small', onclick: () => tab.saveConflict(v.file, output.value) }, 'Salvar e marcar resolvido')),
+          output
+        )
+      )
+    );
+  }
+
+  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, ROW_H };
+})();

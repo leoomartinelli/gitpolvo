@@ -1,0 +1,131 @@
+{
+  "name": "gitpolvo",
+  "productName": "GitPolvo",
+  "version": "1.1.0",
+  "description": "Cliente Git visual, open source e multiplataforma",
+  "main": "src/main.js",
+  "author": "Leonardo Martinelli <leo.martinelli07@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/leoomartinelli/gitpolvo",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leoomartinelli/gitpolvo.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --publish never",
+    "dist:linux": "electron-builder --linux --publish never",
+    "dist:win": "electron-builder --win --publish never",
+    "dist:mac": "electron-builder --mac --publish never",
+    "icon": "electron build/render-icon.js"
+  },
+  "dependencies": {
+    "electron-updater": "6.3.9"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  },
+  "build": {
+    "appId": "io.github.leoomartinelli.gitpolvo",
+    "productName": "GitPolvo",
+    "copyright": "Copyright © 2026 Leonardo Martinelli",
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "src/askpass.js"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "leoomartinelli",
+        "repo": "gitpolvo",
+        "releaseType": "release"
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "rpm",
+        "tar.gz"
+      ],
+      "category": "Development",
+      "icon": "assets/icon.png",
+      "executableName": "gitpolvo",
+      "synopsis": "Cliente Git visual",
+      "artifactName": "GitPolvo-${version}-${arch}.${ext}",
+      "desktop": {
+        "Name": "GitPolvo",
+        "GenericName": "Cliente Git",
+        "Keywords": "git;versionamento;branch;commit;",
+        "StartupWMClass": "GitPolvo"
+      }
+    },
+    "deb": {
+      "artifactName": "gitpolvo_${version}_${arch}.${ext}",
+      "depends": [
+        "git",
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0"
+      ]
+    },
+    "rpm": {
+      "artifactName": "gitpolvo-${version}.${arch}.${ext}"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "artifactName": "GitPolvo-Setup-${version}.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools",
+      "icon": "assets/icon.png",
+      "identity": null,
+      "artifactName": "GitPolvo-${version}-${arch}.${ext}"
+    }
+  }
+}

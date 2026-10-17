@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
+    <title>GitPolvo</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="tabbar">
+      <div id="tabs"></div>
+      <button id="tab-add" class="icon-btn" title="Nova aba (Ctrl+T)">+</button>
+    </div>
+
+    <div id="workspace"></div>
+
+    <div id="ctxmenu" class="hidden"></div>
+    <div id="modal-root"></div>
+    <div id="toasts"></div>
+    <div id="update-bar" class="hidden"></div>
+
+    <script src="git.js"></script>
+    <script src="ui.js"></script>
+    <script src="views.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
