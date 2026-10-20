@@ -1,7 +1,7 @@
 'use strict';
 
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu, net: electronNet } = require('electron');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
@@ -55,8 +55,114 @@ function addRecent(repoPath) {
 }
 
 // Credenciais: git/ssh chamam askpass.sh, que roda askpass.js com o Node do
-// Electron; ele conversa com este servidor, que pergunta à janela.
-const askpass = { sock: null, script: null, pending: new Map(), seq: 0 };
+// Electron; ele conversa com este servidor, que pergunta à janela. A resposta
+// fica em memória nesta sessão e, no SSH, a chave é carregada no agente.
+const askpass = { sock: null, script: null, pending: new Map(), seq: 0, cache: new Map(), added: new Set(), agentPid: null };
+
+function credKey(prompt) {
+  const p = String(prompt || '').trim();
+  const keyFile = /passphrase for(?: key)? ['"]?([^'"]+?)['"]?\s*:?\s*$/i.exec(p);
+  return keyFile ? 'ssh-key:' + keyFile[1] : p;
+}
+
+function credGet(prompt) {
+  const key = credKey(prompt);
+  return key && askpass.cache.has(key) ? askpass.cache.get(key) : null;
+}
+
+function credRemember(prompt, value) {
+  const key = credKey(prompt);
+  if (key && value) askpass.cache.set(key, value);
+}
+
+function looksLikeAuthFailure(stderr, stdout) {
+  return /permission denied|authentication failed|incorrect passphrase|invalid username or password|too many authentication failures|access denied|authori[sz]ation failed/i.test(
+    `${stderr}\n${stdout}`
+  );
+}
+
+function isSock(p) {
+  try {
+    return !!p && fs.statSync(p).isSocket();
+  } catch {
+    return false;
+  }
+}
+
+function sockFromCmd(cmd, args, re) {
+  try {
+    const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 3000 });
+    if (r.status !== 0) return null;
+    const m = re.exec(r.stdout || '');
+    const sock = ((m && m[1]) || r.stdout || '').trim();
+    return isSock(sock) ? sock : null;
+  } catch {
+    return null;
+  }
+}
+
+// Aberto pelo menu, o Electron quase nunca herda o SSH_AUTH_SOCK da sessão.
+function ensureSshAuth() {
+  if (IS_WIN) return;
+  if (isSock(process.env.SSH_AUTH_SOCK)) return;
+  const found =
+    sockFromCmd('systemctl', ['--user', 'show-environment'], /^SSH_AUTH_SOCK=(.+)$/m) ||
+    (IS_MAC && sockFromCmd('launchctl', ['getenv', 'SSH_AUTH_SOCK'], /^(.+)$/)) ||
+    null;
+  if (found) {
+    process.env.SSH_AUTH_SOCK = found;
+    return;
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const xdg = process.env.XDG_RUNTIME_DIR || (uid != null ? `/run/user/${uid}` : '');
+  if (xdg) {
+    for (const name of ['keyring/ssh', 'ssh-agent.socket', 'openssh_agent']) {
+      const p = path.join(xdg, name);
+      if (isSock(p)) {
+        process.env.SSH_AUTH_SOCK = p;
+        return;
+      }
+    }
+  }
+  try {
+    const r = spawnSync('ssh-agent', ['-s'], { encoding: 'utf8', timeout: 4000 });
+    if (r.status !== 0 || !r.stdout) return;
+    const sock = /SSH_AUTH_SOCK=([^;\s]+)/.exec(r.stdout);
+    const pid = /SSH_AGENT_PID=(\d+)/.exec(r.stdout);
+    if (sock) process.env.SSH_AUTH_SOCK = sock[1];
+    if (pid) {
+      process.env.SSH_AGENT_PID = pid[1];
+      askpass.agentPid = Number(pid[1]);
+    }
+  } catch {}
+}
+
+function askpassEnv() {
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
+    // mensagens do git em inglês (o app interpreta algumas delas)
+    LC_ALL: process.platform === 'linux' ? 'C.UTF-8' : 'en_US.UTF-8',
+    GIT_ASKPASS: askpass.script,
+    SSH_ASKPASS: askpass.script,
+    SSH_ASKPASS_REQUIRE: 'force',
+    POLVO_ELECTRON: process.execPath,
+    // empacotado, o askpass.js fica fora do .asar para o Node conseguir executá-lo
+    POLVO_ASKPASS_JS: path.join(__dirname, 'askpass.js').replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`),
+    POLVO_ASKPASS_SOCK: askpass.sock,
+  };
+}
+
+function trySshAdd(prompt) {
+  const key = credKey(prompt);
+  if (!key.startsWith('ssh-key:') || askpass.added.has(key)) return;
+  const keyPath = key.slice(8);
+  if (!keyPath || !fs.existsSync(keyPath)) return;
+  askpass.added.add(key);
+  const child = spawn('ssh-add', [keyPath], { env: askpassEnv(), stdio: 'ignore' });
+  child.on('error', () => {});
+}
 
 function startAskpassServer() {
   // Windows usa named pipe; Linux/macOS, socket de domínio Unix
@@ -73,10 +179,19 @@ function startAskpassServer() {
         buf += d;
         if (!buf.includes('\n')) return;
         const { prompt } = JSON.parse(buf.slice(0, buf.indexOf('\n')));
+        const reply = (r) => conn.end(JSON.stringify(r) + '\n');
+        const cached = credGet(prompt);
+        if (cached != null) {
+          reply({ value: cached });
+          return;
+        }
         const id = ++askpass.seq;
-        askpass.pending.set(id, (reply) => conn.end(JSON.stringify(reply) + '\n'));
-        if (win && !win.isDestroyed()) win.webContents.send('askpass:request', id, prompt);
-        else askpass.pending.get(id)({ cancel: true });
+        if (win && !win.isDestroyed()) {
+          askpass.pending.set(id, { prompt, reply });
+          win.webContents.send('askpass:request', id, prompt);
+        } else {
+          reply({ cancel: true });
+        }
       });
       conn.on('error', () => {});
     })
@@ -90,44 +205,40 @@ function startAskpassServer() {
 }
 
 ipcMain.on('askpass:response', (_e, id, reply) => {
-  const done = askpass.pending.get(id);
+  const pending = askpass.pending.get(id);
   askpass.pending.delete(id);
-  if (done) done(reply);
+  if (!pending) return;
+  if (reply && !reply.cancel && reply.value != null && String(reply.value) !== '') {
+    credRemember(pending.prompt, String(reply.value));
+    trySshAdd(pending.prompt);
+  }
+  pending.reply(reply);
 });
 
 // Executa git sem shell; sempre resolve com { code, stdout, stderr } para que o
 // renderer decida o que é erro (ex.: `diff --no-index` retorna 1 normalmente).
 function runGit(cwd, args, input) {
   return new Promise((resolve) => {
-    const child = spawn('git', args, {
-      cwd,
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: '0',
-        GIT_OPTIONAL_LOCKS: '0',
-        // mensagens do git em inglês (o app interpreta algumas delas)
-        LC_ALL: process.platform === 'linux' ? 'C.UTF-8' : 'en_US.UTF-8',
-        GIT_ASKPASS: askpass.script,
-        SSH_ASKPASS: askpass.script,
-        SSH_ASKPASS_REQUIRE: 'force',
-        POLVO_ELECTRON: process.execPath,
-        // empacotado, o askpass.js fica fora do .asar para o Node conseguir executá-lo
-        POLVO_ASKPASS_JS: path.join(__dirname, 'askpass.js').replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`),
-        POLVO_ASKPASS_SOCK: askpass.sock,
-      },
-    });
+    const child = spawn('git', args, { cwd, env: askpassEnv() });
     const out = [];
     const err = [];
     child.stdout.on('data', (d) => out.push(d));
     child.stderr.on('data', (d) => err.push(d));
     child.on('error', (e) => resolve({ code: -1, stdout: '', stderr: String(e.message) }));
-    child.on('close', (code) =>
-      resolve({
-        code,
-        stdout: Buffer.concat(out).toString('utf8'),
-        stderr: Buffer.concat(err).toString('utf8'),
-      })
-    );
+    child.on('close', (code) => {
+      const stdout = Buffer.concat(out).toString('utf8');
+      const stderr = Buffer.concat(err).toString('utf8');
+      if (
+        code !== 0 &&
+        askpass.cache.size &&
+        args.some((a) => a === 'fetch' || a === 'pull' || a === 'push' || a === 'clone' || a === 'ls-remote' || a === 'submodule') &&
+        looksLikeAuthFailure(stderr, stdout)
+      ) {
+        askpass.cache.clear();
+        askpass.added.clear();
+      }
+      resolve({ code, stdout, stderr });
+    });
     if (input != null) child.stdin.end(input);
     else child.stdin.end();
   });
@@ -661,6 +772,7 @@ ipcMain.handle('update:download', async () => {
 ipcMain.handle('update:install', () => updater.lib && updater.lib.quitAndInstall(false, true));
 
 app.whenReady().then(() => {
+  ensureSshAuth();
   startAskpassServer();
   buildMenu();
   createWindow();
@@ -676,6 +788,11 @@ app.on('window-all-closed', () => {
 });
 
 app.on('quit', () => {
+  if (askpass.agentPid) {
+    try {
+      process.kill(askpass.agentPid);
+    } catch {}
+  }
   if (IS_WIN) return;
   try {
     fs.unlinkSync(askpass.sock);

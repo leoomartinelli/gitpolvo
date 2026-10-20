@@ -1422,7 +1422,7 @@
       const secret = /password|passphrase|senha|token/i.test(promptText);
       const r = await form('Autenticação', [{ name: 'v', label: promptText.trim() || 'Credencial', type: secret ? 'password' : 'text' }], {
         ok: 'Enviar',
-        message: 'O Git está pedindo uma credencial para acessar o remoto.',
+        message: 'O Git está pedindo uma credencial para acessar o remoto.\nEla fica na memória enquanto o GitPolvo estiver aberto.',
       });
       polvo.answerAskpass(id, r ? { value: r.v } : { cancel: true });
     }
