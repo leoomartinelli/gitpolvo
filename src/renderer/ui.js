@@ -192,10 +192,11 @@ function form(title, fields, { ok = 'OK', danger = false, message } = {}) {
           if (f.options) {
             input = h('select', {}, f.options.map((o) => h('option', { value: o.value, selected: o.value === f.value }, o.label)));
           } else if (f.type === 'checkbox') {
-            input = h('input', { type: 'checkbox' });
+            input = h('input', { type: 'checkbox', disabled: !!f.disabled });
             input.checked = !!f.value;
+            input.disabled = !!f.disabled;
             inputs[f.name] = input;
-            body.append(h('label', { style: { flexDirection: 'row', alignItems: 'center', color: 'var(--text)' } }, input, f.label));
+            body.append(h('label', { class: 'check' + (f.disabled ? ' disabled' : '') }, input, f.label));
             continue;
           } else {
             input = h('input', { type: f.type || 'text', placeholder: f.placeholder || '', spellcheck: 'false' });

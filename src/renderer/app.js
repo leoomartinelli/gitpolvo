@@ -887,7 +887,7 @@
       polvo.onRepoChanged((root) => {
         for (const t of this.tabs) if (t.kind === 'repo' && t.repo.root === root && !t.busy) t.refresh();
       });
-      polvo.onAskpass((id, promptText) => this.askpass(id, promptText));
+      polvo.onAskpass((id, promptText, meta) => this.askpass(id, promptText, meta));
       // Rede de segurança além do watcher: relê ao voltar para a janela e,
       // enquanto ela está em foco, a cada 10 s.
       polvo.onWindowFocus(() => this.refreshActive());
@@ -1418,13 +1418,36 @@
       );
     }
 
-    async askpass(id, promptText) {
+    async askpass(id, promptText, meta) {
+      const info = meta && typeof meta === 'object' ? meta : {};
       const secret = /password|passphrase|senha|token/i.test(promptText);
-      const r = await form('Autenticação', [{ name: 'v', label: promptText.trim() || 'Credencial', type: secret ? 'password' : 'text' }], {
-        ok: 'Enviar',
-        message: 'O Git está pedindo uma credencial para acessar o remoto.\nEla fica na memória enquanto o GitPolvo estiver aberto.',
-      });
-      polvo.answerAskpass(id, r ? { value: r.v } : { cancel: true });
+      const offerRemember = !!info.ssh && secret;
+      const fields = [{ name: 'v', label: promptText.trim() || 'Credencial', type: secret ? 'password' : 'text' }];
+      let canPersist = false;
+      if (offerRemember) {
+        try {
+          canPersist = await polvo.cred.canPersist();
+        } catch {
+          canPersist = false;
+        }
+        fields.push({
+          name: 'remember',
+          label: 'Lembrar senha SSH neste computador',
+          type: 'checkbox',
+          value: !!info.remembered && canPersist,
+          disabled: !canPersist,
+        });
+      }
+      const message = offerRemember
+        ? canPersist
+          ? 'O Git está pedindo a senha SSH para acessar o remoto.\nPor padrão ela fica só enquanto o GitPolvo estiver aberto e é apagada ao fechar.'
+          : 'O Git está pedindo a senha SSH para acessar o remoto.\nEla fica só enquanto o GitPolvo estiver aberto e é apagada ao fechar. O cofre do sistema não está disponível neste computador.'
+        : secret
+          ? 'O Git está pedindo uma credencial para acessar o remoto.\nEla fica na memória enquanto o GitPolvo estiver aberto.'
+          : 'O Git está pedindo uma credencial para acessar o remoto.';
+      const r = await form('Autenticação', fields, { ok: 'Enviar', message });
+      const remember = offerRemember ? (canPersist ? !!(r && r.remember) : !!info.remembered) : false;
+      polvo.answerAskpass(id, r ? { value: r.v, remember } : { cancel: true });
     }
   }
 

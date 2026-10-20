@@ -32,8 +32,11 @@ contextBridge.exposeInMainWorld('polvo', {
   onRepoChanged: (fn) => ipcRenderer.on('repo:changed', (_e, p) => fn(p)),
   onWindowFocus: (fn) => ipcRenderer.on('window:focus', () => fn()),
   onMenu: (fn) => ipcRenderer.on('menu:command', (_e, name) => fn(name)),
-  onAskpass: (fn) => ipcRenderer.on('askpass:request', (_e, id, prompt) => fn(id, prompt)),
+  onAskpass: (fn) => ipcRenderer.on('askpass:request', (_e, id, prompt, meta) => fn(id, prompt, meta || {})),
   answerAskpass: (id, reply) => ipcRenderer.send('askpass:response', id, reply),
+  cred: {
+    canPersist: () => ipcRenderer.invoke('cred:canPersist'),
+  },
   updates: {
     check: () => ipcRenderer.invoke('update:check'),
     last: () => ipcRenderer.invoke('update:last'),
