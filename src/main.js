@@ -1,12 +1,21 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, net: electronNet } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, net: electronNet, safeStorage } = require('electron');
 const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const crypto = require('crypto');
+
+const {
+  credKey,
+  isSshCredentialPrompt,
+  shouldPersist,
+  packCredentials,
+  unpackCredentials,
+  applyPersistUpdate,
+} = require('./credentials');
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -55,14 +64,97 @@ function addRecent(repoPath) {
 }
 
 // Credenciais: git/ssh chamam askpass.sh, que roda askpass.js com o Node do
-// Electron; ele conversa com este servidor, que pergunta à janela. A resposta
-// fica em memória nesta sessão e, no SSH, a chave é carregada no agente.
-const askpass = { sock: null, script: null, pending: new Map(), seq: 0, cache: new Map(), added: new Set(), agentPid: null };
+// Electron; ele conversa com este servidor, que pergunta à janela.
+// Por padrão a senha fica só na memória e é apagada ao fechar. Se o usuário
+// marcar "Lembrar senha SSH neste computador", ela é cifrada com o cofre do
+// sistema (safeStorage: Keychain, DPAPI ou libsecret) e volta na próxima abertura.
+const askpass = {
+  sock: null,
+  script: null,
+  pending: new Map(),
+  seq: 0,
+  cache: new Map(),
+  persisted: new Set(),
+  sessionOnly: new Set(),
+  added: new Set(),
+  addedSession: new Set(),
+  agentPid: null,
+  wiped: false,
+};
 
-function credKey(prompt) {
-  const p = String(prompt || '').trim();
-  const keyFile = /passphrase for(?: key)? ['"]?([^'"]+?)['"]?\s*:?\s*$/i.exec(p);
-  return keyFile ? 'ssh-key:' + keyFile[1] : p;
+function credsFile() {
+  return path.join(app.getPath('userData'), 'ssh-credentials.json');
+}
+
+function encryptionAvailable() {
+  try {
+    return safeStorage.isEncryptionAvailable();
+  } catch {
+    return false;
+  }
+}
+
+// null = cofre indisponível (não mexer no arquivo). {} = nada gravado.
+function readPersistedMap() {
+  if (!encryptionAvailable()) return null;
+  const file = credsFile();
+  if (!fs.existsSync(file)) return {};
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  return unpackCredentials(raw, (blob) => safeStorage.decryptString(Buffer.from(blob, 'base64')));
+}
+
+function writePersistedMap(map) {
+  const file = credsFile();
+  if (!encryptionAvailable()) return false;
+  const packed = packCredentials(map, (json) => safeStorage.encryptString(json).toString('base64'));
+  if (!packed) {
+    try {
+      fs.unlinkSync(file);
+    } catch {}
+    return true;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(packed) + '\n', { mode: 0o600 });
+  try {
+    fs.chmodSync(tmp, 0o600);
+  } catch {}
+  fs.renameSync(tmp, file);
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {}
+  return true;
+}
+
+function updatePersistedKey(key, value) {
+  let map;
+  try {
+    map = readPersistedMap();
+  } catch {
+    return false;
+  }
+  if (map == null) return false;
+  if ((value == null || value === '') && !Object.prototype.hasOwnProperty.call(map, key)) return true;
+  try {
+    return writePersistedMap(applyPersistUpdate(map, key, value));
+  } catch {
+    return false;
+  }
+}
+
+function loadPersistedCredentials() {
+  let map;
+  try {
+    map = readPersistedMap();
+  } catch {
+    return;
+  }
+  if (!map) return;
+  for (const [k, v] of Object.entries(map)) {
+    askpass.cache.set(k, v);
+    askpass.persisted.add(k);
+    if (k.startsWith('ssh-key:')) trySshAddKey(k);
+  }
 }
 
 function credGet(prompt) {
@@ -70,9 +162,88 @@ function credGet(prompt) {
   return key && askpass.cache.has(key) ? askpass.cache.get(key) : null;
 }
 
-function credRemember(prompt, value) {
+function credRemember(prompt, value, remember) {
   const key = credKey(prompt);
-  if (key && value) askpass.cache.set(key, value);
+  if (!key || value == null || String(value) === '') return;
+  const secret = String(value);
+  askpass.cache.set(key, secret);
+  // Sem cofre não dá para gravar nem para apagar o que já estava cifrado.
+  if (!encryptionAvailable()) {
+    if (!askpass.persisted.has(key)) askpass.sessionOnly.add(key);
+    return;
+  }
+  if (shouldPersist(prompt, remember, true)) {
+    if (updatePersistedKey(key, secret)) {
+      askpass.persisted.add(key);
+      askpass.sessionOnly.delete(key);
+      askpass.addedSession.delete(key);
+    }
+    return;
+  }
+  askpass.sessionOnly.add(key);
+  if (askpass.persisted.delete(key)) updatePersistedKey(key, null);
+  if (askpass.added.has(key)) askpass.addedSession.add(key);
+}
+
+// Tira do disco, de uma vez, o que foi usado só nesta sessão.
+function dropSessionKeysFromDisk() {
+  if (!askpass.sessionOnly.size || !encryptionAvailable()) return;
+  let map;
+  try {
+    map = readPersistedMap();
+  } catch {
+    return;
+  }
+  if (!map) return;
+  let changed = false;
+  for (const key of askpass.sessionOnly) {
+    if (askpass.persisted.has(key) || !Object.prototype.hasOwnProperty.call(map, key)) continue;
+    delete map[key];
+    changed = true;
+  }
+  if (!changed) return;
+  try {
+    writePersistedMap(map);
+  } catch {}
+}
+
+// Apaga o que não foi marcado para lembrar: memória, chaves carregadas no
+// agente nesta sessão e qualquer cópia que tenha ido para o disco.
+function wipeSessionCredentials() {
+  if (askpass.wiped) return;
+  askpass.wiped = true;
+  try {
+    forgetSessionKeysFromAgent();
+  } catch {}
+  try {
+    dropSessionKeysFromDisk();
+  } catch {}
+  askpass.cache.clear();
+  askpass.sessionOnly.clear();
+  askpass.added.clear();
+  askpass.addedSession.clear();
+  for (const pending of askpass.pending.values()) {
+    try {
+      pending.reply({ cancel: true });
+    } catch {}
+  }
+  askpass.pending.clear();
+}
+
+function forgetSessionKeysFromAgent() {
+  if (!askpass.addedSession.size) return;
+  const env = { ...process.env };
+  delete env.SSH_ASKPASS;
+  delete env.SSH_ASKPASS_REQUIRE;
+  delete env.GIT_ASKPASS;
+  for (const key of askpass.addedSession) {
+    if (askpass.persisted.has(key) || !key.startsWith('ssh-key:')) continue;
+    const keyPath = key.slice('ssh-key:'.length);
+    if (!keyPath) continue;
+    try {
+      spawnSync('ssh-add', ['-d', keyPath], { env, timeout: 3000, stdio: 'ignore' });
+    } catch {}
+  }
 }
 
 function looksLikeAuthFailure(stderr, stdout) {
@@ -154,14 +325,18 @@ function askpassEnv() {
   };
 }
 
-function trySshAdd(prompt) {
-  const key = credKey(prompt);
-  if (!key.startsWith('ssh-key:') || askpass.added.has(key)) return;
-  const keyPath = key.slice(8);
+function trySshAddKey(key) {
+  if (!key || !key.startsWith('ssh-key:') || askpass.added.has(key)) return;
+  const keyPath = key.slice('ssh-key:'.length);
   if (!keyPath || !fs.existsSync(keyPath)) return;
   askpass.added.add(key);
+  if (!askpass.persisted.has(key)) askpass.addedSession.add(key);
   const child = spawn('ssh-add', [keyPath], { env: askpassEnv(), stdio: 'ignore' });
   child.on('error', () => {});
+}
+
+function trySshAdd(prompt) {
+  trySshAddKey(credKey(prompt));
 }
 
 function startAskpassServer() {
@@ -188,7 +363,10 @@ function startAskpassServer() {
         const id = ++askpass.seq;
         if (win && !win.isDestroyed()) {
           askpass.pending.set(id, { prompt, reply });
-          win.webContents.send('askpass:request', id, prompt);
+          win.webContents.send('askpass:request', id, prompt, {
+            ssh: isSshCredentialPrompt(prompt),
+            remembered: askpass.persisted.has(credKey(prompt)),
+          });
         } else {
           reply({ cancel: true });
         }
@@ -209,7 +387,7 @@ ipcMain.on('askpass:response', (_e, id, reply) => {
   askpass.pending.delete(id);
   if (!pending) return;
   if (reply && !reply.cancel && reply.value != null && String(reply.value) !== '') {
-    credRemember(pending.prompt, String(reply.value));
+    credRemember(pending.prompt, String(reply.value), !!reply.remember);
     trySshAdd(pending.prompt);
   }
   pending.reply(reply);
@@ -420,6 +598,9 @@ function createWindow() {
     return { action: 'deny' };
   });
   win.on('focus', () => send('window:focus'));
+  win.on('close', () => {
+    if (BrowserWindow.getAllWindows().length <= 1) wipeSessionCredentials();
+  });
   win.on('closed', () => {
     win = null;
   });
@@ -604,6 +785,7 @@ ipcMain.handle('avatar:clear', () => {
 });
 
 ipcMain.handle('git:run', (_e, cwd, args, input) => runGit(cwd, args, input));
+ipcMain.handle('cred:canPersist', () => encryptionAvailable());
 
 ipcMain.handle('settings:get', () => loadSettings());
 ipcMain.handle('settings:set', (_e, patch) => saveSettings(patch));
@@ -774,6 +956,7 @@ ipcMain.handle('update:install', () => updater.lib && updater.lib.quitAndInstall
 app.whenReady().then(() => {
   ensureSshAuth();
   startAskpassServer();
+  loadPersistedCredentials();
   buildMenu();
   createWindow();
   setupUpdater();
@@ -783,11 +966,17 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  wipeSessionCredentials();
   for (const repo of [...watchers.keys()]) unwatchRepo(repo);
   app.quit();
 });
 
+app.on('will-quit', () => {
+  wipeSessionCredentials();
+});
+
 app.on('quit', () => {
+  wipeSessionCredentials();
   if (askpass.agentPid) {
     try {
       process.kill(askpass.agentPid);

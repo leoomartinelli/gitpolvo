@@ -1120,6 +1120,29 @@ select:focus {
   color: var(--text-dim);
 }
 
+.modal label.check {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+  user-select: none;
+}
+
+.modal label.check input {
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  padding: 0;
+  flex: none;
+  accent-color: var(--accent);
+}
+
+.modal label.check.disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
 .modal .row {
   display: flex;
   gap: 8px;
