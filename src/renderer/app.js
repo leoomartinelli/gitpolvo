@@ -595,8 +595,24 @@
       return r ? r.remote : null;
     }
 
-    fetch() {
-      return this.op('Fetch', () => this.repo.run(['fetch', '--all', '--prune', '--tags']), { success: 'Fetch concluído' });
+    fetch(opts = {}) {
+      const silent = !!opts.silent;
+      return this.op('Fetch', () => this.repo.run(['fetch', '--all', '--prune', '--tags']), {
+        success: silent ? undefined : 'Fetch concluído',
+        quiet: silent,
+      });
+    }
+
+    // Ao abrir a guia: mostra o estado local na hora e busca o remoto sem toast.
+    async fetchOnOpen() {
+      if (this.busy) return;
+      try {
+        const remotes = await this.repo.remoteNames();
+        if (!remotes.length || this.busy) return;
+        return this.fetch({ silent: true });
+      } catch {
+        // sem remoto ou git indisponível: a tela local já foi carregada
+      }
     }
 
     async pull(mode) {
@@ -1039,6 +1055,7 @@
       } else if (tab.kind === 'repo') {
         tab.refresh();
       } else tab.render();
+      if (tab.kind === 'repo') tab.fetchOnOpen();
       this.renderTabs();
       this.persistTabs();
       document.title = tab.kind === 'repo' ? `${tab.repo.name} — GitPolvo` : 'GitPolvo';

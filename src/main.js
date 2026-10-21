@@ -16,6 +16,7 @@ const {
   unpackCredentials,
   applyPersistUpdate,
 } = require('./credentials');
+const { linuxUpdateScript } = require('./linux-update');
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -890,7 +891,60 @@ ipcMain.handle('app:info', () => ({
 // releases do GitHub. No macOS sem assinatura de código a instalação
 // automática não é permitida, então o aviso abre a página de download.
 const UPDATE_REPO = 'leoomartinelli/gitpolvo';
-const updater = { lib: null, info: null, manualOnly: IS_MAC };
+const updater = { lib: null, info: null, manualOnly: IS_MAC, installing: false };
+
+function linuxPackageKind() {
+  if (process.env.APPIMAGE) return 'appimage';
+  try {
+    return fs.readFileSync(path.join(process.resourcesPath, 'package-type'), 'utf8').trim();
+  } catch {
+    return null;
+  }
+}
+
+function downloadedUpdateFile() {
+  const helper = updater.lib && updater.lib.downloadedUpdateHelper;
+  return helper && helper.file ? helper.file : null;
+}
+
+function spawnLinuxUpdateHelper() {
+  const kind = linuxPackageKind();
+  const installerPath = downloadedUpdateFile();
+  if (!kind || !installerPath) return false;
+  if (kind !== 'deb' && kind !== 'rpm' && kind !== 'appimage') return false;
+  const script = linuxUpdateScript({
+    pid: process.pid,
+    kind,
+    installerPath,
+    relaunchPath: process.execPath,
+    appImagePath: process.env.APPIMAGE || '',
+  });
+  try {
+    const child = spawn('/bin/bash', ['-c', script], { detached: true, stdio: 'ignore', env: process.env });
+    child.unref();
+    return child.pid != null;
+  } catch {
+    return false;
+  }
+}
+
+// Fecha, instala e reabre. No Linux o instalador roda DEPOIS deste processo
+// sair: sobrescrever /opt/GitPolvo (ou o AppImage) com o Electron ainda aberto
+// derruba o processo e o relaunch do electron-updater não chega a correr.
+function installAndRelaunch() {
+  if (!updater.lib || updater.installing) return;
+  updater.installing = true;
+  const finish = () => {
+    if (process.platform === 'linux' && spawnLinuxUpdateHelper()) {
+      app.quit();
+      return;
+    }
+    updater.lib.quitAndInstall(false, true);
+  };
+  // devolve o IPC/evento ao renderer antes de destruir a janela; senão o
+  // Chromium aborta e o app não reabre
+  setTimeout(finish, 150);
+}
 
 function sendUpdate(status) {
   updater.last = status;
@@ -951,7 +1005,7 @@ ipcMain.handle('update:download', async () => {
   sendUpdate({ state: 'downloading', percent: 0 });
   await updater.lib.downloadUpdate();
 });
-ipcMain.handle('update:install', () => updater.lib && updater.lib.quitAndInstall(false, true));
+ipcMain.on('update:install', () => installAndRelaunch());
 
 app.whenReady().then(() => {
   ensureSshAuth();

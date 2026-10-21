@@ -41,7 +41,7 @@ contextBridge.exposeInMainWorld('polvo', {
     check: () => ipcRenderer.invoke('update:check'),
     last: () => ipcRenderer.invoke('update:last'),
     download: () => ipcRenderer.invoke('update:download'),
-    install: () => ipcRenderer.invoke('update:install'),
+    install: () => ipcRenderer.send('update:install'),
     onStatus: (fn) => ipcRenderer.on('update:status', (_e, s) => fn(s)),
   },
 });
