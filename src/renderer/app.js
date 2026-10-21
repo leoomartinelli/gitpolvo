@@ -30,6 +30,9 @@
       this.treeCache = new Map();
       this.search = '';
       this.busy = null;
+      this.fetching = false;
+      this.backgroundFetch = false;
+      this.skipAutoFetch = false;
       this.page = h('div', { class: 'tab-page' });
       V.buildLayout(this);
       polvo.repo.watch(root);
@@ -370,14 +373,24 @@
     }
 
     // ---------- branches ----------
+    // Duplo clique na branch atual (ou no remoto dela) quando o remoto está à
+    // frente: puxa os commits. Senão, checkout como antes.
+    pullIfBehind(local) {
+      return !!(local && local.current && local.behind);
+    }
+
     async checkout(name) {
+      const b = this.data.refs.local.find((x) => x.name === name);
+      if (this.pullIfBehind(b)) return this.pull();
+      if (b?.current) return;
       return this.op(`Checkout de ${name}`, () => this.repo.run(['switch', name]), { success: `Agora em ${name}` });
     }
 
     async checkoutRemote(full) {
       const name = full.slice(full.indexOf('/') + 1);
-      const exists = this.data.refs.local.some((b) => b.name === name);
-      if (exists) return this.checkout(name);
+      const local = this.data.refs.local.find((b) => b.name === name);
+      if (this.pullIfBehind(local)) return this.pull();
+      if (local) return this.checkout(name);
       return this.op(`Checkout de ${full}`, () => this.repo.run(['switch', '--track', '-c', name, full]), { success: `Branch ${name} criada rastreando ${full}` });
     }
 
@@ -595,21 +608,37 @@
       return r ? r.remote : null;
     }
 
-    fetch(opts = {}) {
-      const silent = !!opts.silent;
-      return this.op('Fetch', () => this.repo.run(['fetch', '--all', '--prune', '--tags']), {
-        success: silent ? undefined : 'Fetch concluído',
-        quiet: silent,
-      });
+    fetch() {
+      this.skipAutoFetch = false;
+      return this.op('Fetch', () => this.repo.run(['fetch', '--all', '--prune', '--tags']), { success: 'Fetch concluído' });
     }
 
-    // Ao abrir a guia: mostra o estado local na hora e busca o remoto sem toast.
-    async fetchOnOpen() {
-      if (this.busy) return;
+    // Fetch de fundo: não trava a barra com "Fetch..." (o manual continua com spinner).
+    async fetchSilent({ background } = {}) {
+      if (this.fetching || this.busy) return;
+      if (background && this.skipAutoFetch) return;
+      this.fetching = true;
+      this.backgroundFetch = !!background;
+      try {
+        await this.repo.run(['fetch', '--all', '--prune', '--tags']);
+        this.skipAutoFetch = false;
+      } catch {
+        // automático: offline ou sem credencial não deve cobrir o grafo
+      } finally {
+        this.backgroundFetch = false;
+        this.fetching = false;
+        if (!this.busy) await this.refresh();
+      }
+    }
+
+    // Ao abrir a guia, e a cada 5 s enquanto ela está em foco.
+    async fetchOnOpen({ background } = {}) {
+      if (this.busy || this.fetching) return;
+      if (background && this.skipAutoFetch) return;
       try {
         const remotes = await this.repo.remoteNames();
-        if (!remotes.length || this.busy) return;
-        return this.fetch({ silent: true });
+        if (!remotes.length || this.busy || this.fetching) return;
+        return this.fetchSilent({ background });
       } catch {
         // sem remoto ou git indisponível: a tela local já foi carregada
       }
@@ -763,8 +792,11 @@
     remoteBranchMenu(remote, name) {
       const full = `${remote}/${name}`;
       const cur = this.data.head.branch;
+      const local = this.data.refs.local.find((b) => b.name === name);
       return [
-        { label: `Checkout (criar local ${name})`, action: () => this.checkoutRemote(full) },
+        this.pullIfBehind(local)
+          ? { label: `Pull (${local.behind} no remoto)`, action: () => this.pull() }
+          : { label: `Checkout (criar local ${name})`, action: () => this.checkoutRemote(full) },
         cur && { label: `Merge de ${full} em ${cur}`, action: () => this.merge(full) },
         cur && { label: `Rebase de ${cur} sobre ${full}`, action: () => this.rebase(full) },
         '-',
@@ -909,6 +941,11 @@
       polvo.onWindowFocus(() => this.refreshActive());
       polvo.updates.onStatus((st) => this.onUpdateStatus(st));
       setInterval(() => document.hasFocus() && this.refreshActive(), 10000);
+      setInterval(() => {
+        if (!document.hasFocus() || document.querySelector('.modal-back')) return;
+        const t = this.repoTab();
+        if (t) t.fetchOnOpen({ background: true });
+      }, 5000);
       document.addEventListener('keydown', (e) => this.onKey(e));
       window.addEventListener('resize', () => this.active?.kind === 'repo' && V.renderGraphRows(this.active));
     }
@@ -1436,6 +1473,12 @@
     }
 
     async askpass(id, promptText, meta) {
+      const tab = this.repoTab();
+      if (tab && tab.backgroundFetch) {
+        tab.skipAutoFetch = true;
+        polvo.answerAskpass(id, { cancel: true });
+        return;
+      }
       const info = meta && typeof meta === 'object' ? meta : {};
       const secret = /password|passphrase|senha|token/i.test(promptText);
       const offerRemember = !!info.ssh && secret;

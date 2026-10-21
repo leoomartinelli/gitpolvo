@@ -286,7 +286,7 @@
           class: 'ref-item' + (b.current ? ' current' : ''),
           draggable: 'true',
           'data-ref': 'local:' + b.name,
-          title: b.upstream ? `${b.name} → ${b.upstream}` : b.name,
+          title: (b.upstream ? `${b.name} → ${b.upstream}` : b.name) + (b.current && b.behind ? '\nDuplo clique: pull' : ''),
           onclick: () => tab.selectSha(b.sha),
           ondblclick: () => tab.checkout(b.name),
           oncontextmenu: (e) => {
@@ -334,6 +334,7 @@
       );
       if (!groupCollapsed) {
         for (const b of shown) {
+          const local = refs.local.find((l) => l.name === b.name);
           remoteItems.push(
             h(
               'div',
@@ -341,6 +342,7 @@
                 class: 'ref-item sub',
                 draggable: 'true',
                 'data-ref': 'remote:' + b.full,
+                title: local?.current && local.behind ? `${b.full}\nDuplo clique: pull` : b.full,
                 onclick: () => tab.selectSha(b.sha),
                 ondblclick: () => tab.checkoutRemote(b.full),
                 oncontextmenu: (e) => {
@@ -515,7 +517,11 @@
               draggable: 'true',
               'data-ref': 'remote:' + r.name,
               style: { background: `color-mix(in srgb, ${color} 35%, var(--bg))` },
-              title: r.name,
+              title: (() => {
+                const short = r.name.slice(r.name.indexOf('/') + 1);
+                const local = (tab.data.refs?.local || []).find((l) => l.name === short);
+                return local?.current && local.behind ? `${r.name}\nDuplo clique: pull` : r.name;
+              })(),
               ondblclick: () => tab.checkoutRemote(r.name),
               oncontextmenu: (e) => {
                 e.preventDefault();
@@ -557,7 +563,11 @@
               draggable: 'true',
               'data-ref': 'local:' + r.name,
               style: { background: `color-mix(in srgb, ${color} ${r.type === 'head' ? 62 : 35}%, var(--bg))` },
-              title: r.name + (hasRemote ? ' (sincronizada com remoto)' : ''),
+              title: (() => {
+                const local = (tab.data.refs?.local || []).find((l) => l.name === r.name);
+                const extra = local?.current && local.behind ? '\nDuplo clique: pull' : hasRemote ? ' (sincronizada com remoto)' : '';
+                return r.name + extra;
+              })(),
               ondblclick: () => tab.checkout(r.name),
               oncontextmenu: (e) => {
                 e.preventDefault();
