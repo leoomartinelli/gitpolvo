@@ -497,9 +497,10 @@
     const xc = X(g.col);
     const color = laneColor(g.col);
     const s = svg('svg', { width: W, height: H });
-    if (opts.wip) {
-      if (g.lineDown) s.append(svg('line', { x1: xc, y1: mid + NODE / 2, x2: xc, y2: H, stroke: color, 'stroke-width': 2, 'stroke-dasharray': '3 3' }));
-      s.append(svg('circle', { cx: xc, cy: mid, r: NODE / 2 - 1, fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-dasharray': '3 2.5' }));
+    if (opts.wip || opts.stash) {
+      const stroke = opts.stash ? '#e3b341' : color;
+      if (g.lineDown) s.append(svg('line', { x1: xc, y1: mid + NODE / 2, x2: xc, y2: H, stroke: stroke, 'stroke-width': 2, 'stroke-dasharray': '3 3' }));
+      s.append(svg('circle', { cx: xc, cy: mid, r: NODE / 2 - 1, fill: 'none', stroke: stroke, 'stroke-width': 2, 'stroke-dasharray': '3 2.5' }));
       return s;
     }
     // faixa translúcida da cor da linha, do nó até a mensagem
@@ -799,7 +800,29 @@
     for (let i = first; i < last; i++) {
       const it = items[i];
       let row;
-      if (it.type === 'wip') {
+      if (it.type === 'stash') {
+        const s = it.stash;
+        const hit = q && it.searchText.includes(q);
+        row = h(
+          'div',
+          {
+            class: 'g-row stash-row' + (tab.selected === s.sha ? ' selected' : '') + (q ? (hit ? ' match' : ' dimmed') : ''),
+            style: { top: i * ROW_H + 'px' },
+            onclick: () => tab.selectStash(s),
+            oncontextmenu: (e) => {
+              e.preventDefault();
+              tab.selectStash(s);
+              showMenu(e.clientX, e.clientY, tab.stashMenu(s));
+            },
+          },
+          h('div', { class: 'col-refs' }, h('span', { class: 'badge stash-badge', title: s.ref }, s.ref || 'stash')),
+          h('div', { class: 'col-graph' }, rowSvg(it.g, tab.layout.maxLanes, { stash: true, colWidth: gw })),
+          h('div', { class: 'col-msg' }, s.msg || s.ref || 'stash'),
+          h('div', { class: 'col-author' }),
+          h('div', { class: 'col-date' }),
+          h('div', { class: 'col-sha mono' }, (s.sha || '').slice(0, 7))
+        );
+      } else if (it.type === 'wip') {
         const st = tab.data.status;
         const n = st.staged.length + st.unstaged.length + st.conflicts.length;
         row = h(

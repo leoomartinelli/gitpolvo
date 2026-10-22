@@ -910,9 +910,25 @@ select:focus {
   color: var(--text-dim);
 }
 
-.wip-row .col-msg {
+.wip-row .col-msg,
+.stash-row .col-msg {
   font-style: italic;
   color: var(--text-dim);
+}
+
+.stash-row .col-msg {
+  color: var(--warn);
+}
+
+.badge.stash-badge {
+  color: #1b1e24;
+  background: #e3b341;
+  border-color: #e3b341;
+  cursor: default;
+}
+
+html[data-theme='light'] .badge.stash-badge {
+  color: #3d2e00;
 }
 
 .badge {

@@ -78,7 +78,7 @@
         this.refreshing = false;
         if (this.refreshAgain) {
           this.refreshAgain = false;
-          this.refresh();
+          await this.refresh();
         }
       }
     }
@@ -128,6 +128,14 @@
     rowItems() {
       if (this._rowItems) return this._rowItems;
       const items = [];
+      for (const s of this.data.stashes || []) {
+        items.push({
+          type: 'stash',
+          stash: s,
+          g: { col: 0 },
+          searchText: `${s.msg || ''} ${s.ref || ''}`.toLowerCase(),
+        });
+      }
       if (this.hasWip() && this.commits.length) {
         const headIdx = this.shaIndex.get(this.headSha);
         const col = headIdx != null ? this.layout.rows[headIdx].col : 0;
@@ -220,11 +228,17 @@
 
     move(delta) {
       const items = this.rowItems();
-      let idx = items.findIndex((it) => (it.type === 'wip' ? this.selected === 'WIP' : it.c.sha === this.selected));
+      let idx = items.findIndex((it) => {
+        if (it.type === 'wip') return this.selected === 'WIP';
+        if (it.type === 'stash') return this.selected === it.stash.sha;
+        return it.c.sha === this.selected;
+      });
       idx = Math.max(0, Math.min(items.length - 1, (idx < 0 ? 0 : idx) + delta));
       const it = items[idx];
       if (!it) return;
-      this.select(it.type === 'wip' ? 'WIP' : it.c.sha);
+      if (it.type === 'wip') this.select('WIP');
+      else if (it.type === 'stash') this.selectStash(it.stash);
+      else this.select(it.c.sha);
       V.scrollToRow(this, idx);
     }
 
@@ -237,12 +251,17 @@
       const q = this.search.trim().toLowerCase();
       if (!q) return;
       const items = this.rowItems();
-      const cur = items.findIndex((it) => it.type === 'commit' && it.c.sha === this.selected);
+      const cur = items.findIndex((it) => (it.type === 'commit' && it.c.sha === this.selected) || (it.type === 'stash' && it.stash.sha === this.selected));
       for (let k = 1; k <= items.length; k++) {
         const i = (cur + dir * k + items.length * 2) % items.length;
         const it = items[i];
         if (it.type === 'commit' && it.searchText.includes(q)) {
           this.select(it.c.sha);
+          V.scrollToRow(this, i);
+          return;
+        }
+        if (it.type === 'stash' && it.searchText.includes(q)) {
+          this.selectStash(it.stash);
           V.scrollToRow(this, i);
           return;
         }
@@ -413,7 +432,9 @@
     }
 
     async stashThenSwitch(name) {
-      return this.op('Stash', () => this.repo.run(['stash', 'push', '--include-untracked', '-m', `WIP antes de ${name}`]), { success: 'Alterações guardadas no stash' });
+      const ok = await this.op('Stash', () => this.repo.run(['stash', 'push', '--include-untracked', '-m', `WIP antes de ${name}`]), { success: 'Alterações guardadas no stash' });
+      if (ok) this.collapsed.stashes = false;
+      return ok;
     }
 
     async checkout(name) {

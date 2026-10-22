@@ -110,14 +110,16 @@ class Repo {
   }
 
   async stashes() {
-    const r = await this.raw(['stash', 'list', `--format=%H${FS}%gd${FS}%s`]);
+    const r = await this.raw(['stash', 'list', `--format=%H%x1f%gd%x1f%s`]);
+    if (r.code !== 0) return [];
     return r.stdout
       .split('\n')
       .filter(Boolean)
       .map((l) => {
         const [sha, ref, msg] = l.split(FS);
-        return { sha, ref, msg };
-      });
+        return { sha, ref, msg: msg || ref || '' };
+      })
+      .filter((s) => s.sha);
   }
 
   async status() {

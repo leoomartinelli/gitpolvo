@@ -13,6 +13,10 @@
 
 # Novidades
 
+## Stash aparece no grafo depois de trocar de branch
+
+- Ao guardar o WIP no stash e trocar de branch, o stash fica visível no topo do grafo (e na lista da esquerda), como no GitKraken
+
 ## Polvo na branch enquanto carrega
 
 - Operações Git (pull, push, fetch, checkout…) mostram o polvo animado ao lado da branch, com o nome do que está acontecendo
