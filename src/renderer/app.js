@@ -1515,5 +1515,6 @@
 
   const app = new App();
   window.polvoApp = app;
-  app.start();
+  const started = app.start();
+  if (window.polvoSplash) window.polvoSplash.waitFor(started);
 })();

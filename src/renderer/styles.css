@@ -2094,3 +2094,73 @@ button.sb-item:hover {
 #update-bar {
   bottom: 38px;
 }
+
+/* ---------- splash de abertura ---------- */
+#splash {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #1b1e24;
+  transition: opacity 0.45s ease;
+}
+
+#splash.out {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.splash-stage {
+  width: min(420px, 70vw);
+}
+
+.splash-art {
+  width: 100%;
+  height: auto;
+  display: block;
+  overflow: visible;
+}
+
+.splash-body {
+  transform-origin: 128px 100px;
+  animation: splash-bob 2.4s ease-in-out infinite;
+}
+
+.splash-eyes {
+  transform-origin: 128px 104px;
+  animation: splash-blink 4.2s ease-in-out infinite;
+}
+
+.splash-brand {
+  margin-top: -8px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: #34d1bf;
+  text-transform: uppercase;
+}
+
+@keyframes splash-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes splash-blink {
+  0%,
+  88%,
+  100% {
+    transform: scaleY(1);
+  }
+  92% {
+    transform: scaleY(0.08);
+  }
+}
