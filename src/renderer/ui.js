@@ -325,4 +325,73 @@ function palette(items, placeholder = 'Digite um comando...') {
   });
 }
 
-window.UI = { h, svg, laneColor, hashColor, avatar, avatars,relDate, fullDate, toast, showMenu, hideMenu, openModal, form, prompt, confirmBox, palette };
+function inlineMd(s) {
+  const out = [];
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(s))) {
+    if (m.index > last) out.push(s.slice(last, m.index));
+    const tok = m[1];
+    if (tok.startsWith('**')) out.push(h('strong', {}, tok.slice(2, -2)));
+    else if (tok.startsWith('`')) out.push(h('code', {}, tok.slice(1, -1)));
+    else {
+      const mm = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(tok);
+      out.push(
+        h(
+          'a',
+          {
+            href: mm[2],
+            onclick: (e) => {
+              e.preventDefault();
+              if (window.polvo) window.polvo.openExternal(mm[2]);
+            },
+          },
+          mm[1]
+        )
+      );
+    }
+    last = m.index + tok.length;
+  }
+  if (last < s.length) out.push(s.slice(last));
+  return out;
+}
+
+function renderMarkdown(md) {
+  const root = h('div', { class: 'md' });
+  const lines = String(md || '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\r\n/g, '\n')
+    .split('\n');
+  let list = null;
+  const flush = () => {
+    if (list) {
+      root.append(list);
+      list = null;
+    }
+  };
+  for (const line of lines) {
+    if (/^# /.test(line)) {
+      flush();
+      root.append(h('h1', {}, ...inlineMd(line.slice(2))));
+    } else if (/^## /.test(line)) {
+      flush();
+      root.append(h('h2', {}, ...inlineMd(line.slice(3))));
+    } else if (/^### /.test(line)) {
+      flush();
+      root.append(h('h3', {}, ...inlineMd(line.slice(4))));
+    } else if (/^[-*] /.test(line)) {
+      if (!list) list = h('ul', {});
+      list.append(h('li', {}, ...inlineMd(line.slice(2))));
+    } else if (!line.trim()) {
+      flush();
+    } else {
+      flush();
+      root.append(h('p', {}, ...inlineMd(line)));
+    }
+  }
+  flush();
+  return root;
+}
+
+window.UI = { h, svg, laneColor, hashColor, avatar, avatars, relDate, fullDate, toast, showMenu, hideMenu, openModal, form, prompt, confirmBox, palette, renderMarkdown };

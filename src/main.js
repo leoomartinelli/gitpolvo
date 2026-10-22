@@ -569,7 +569,10 @@ function buildMenu() {
     },
     {
       label: 'A&juda',
-      submenu: [{ label: 'Sobre o GitPolvo', click: cmd('help:about') }],
+      submenu: [
+        { label: 'O que há de novo', click: cmd('help:whatsNew') },
+        { label: 'Sobre o GitPolvo', click: cmd('help:about') },
+      ],
     },
   ];
   template.find((m) => m.label === 'A&juda').submenu.push({ label: 'Verificar atualizações', click: cmd('help:updates') });
@@ -884,6 +887,14 @@ ipcMain.handle('app:info', () => ({
   chrome: process.versions.chrome,
   node: process.versions.node,
 }));
+
+ipcMain.handle('app:whatsNew', () => {
+  try {
+    return fs.readFileSync(path.join(__dirname, 'novidades.md'), 'utf8');
+  } catch {
+    return '';
+  }
+});
 
 // ---------- atualizações (opcionais) ----------
 // Nada é baixado sem o usuário pedir: o app só avisa que existe versão nova.

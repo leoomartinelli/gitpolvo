@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('polvo', {
   readFile: (repo, rel) => ipcRenderer.invoke('fs:readFile', repo, rel),
   writeFile: (repo, rel, content) => ipcRenderer.invoke('fs:writeFile', repo, rel, content),
   appInfo: () => ipcRenderer.invoke('app:info'),
+  whatsNew: () => ipcRenderer.invoke('app:whatsNew'),
   zoom: {
     get: () => webFrame.getZoomFactor(),
     reset: () => webFrame.setZoomFactor(1),

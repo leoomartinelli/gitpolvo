@@ -297,6 +297,85 @@ select:focus {
   min-width: 0;
 }
 
+/* ---------- novidades ---------- */
+.notes {
+  flex: 1;
+  overflow: auto;
+  padding: 28px 20px 48px;
+}
+
+.notes-inner {
+  width: min(640px, 92%);
+  margin: 0 auto;
+}
+
+.notes-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.notes-head img {
+  width: 44px;
+  height: 44px;
+}
+
+.notes-head h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.notes-actions {
+  margin-top: 28px;
+}
+
+.md h1 {
+  display: none;
+}
+
+.md h2 {
+  margin: 22px 0 8px;
+  font-size: 15px;
+  color: var(--accent);
+}
+
+.md h2:first-of-type {
+  margin-top: 0;
+}
+
+.md h3 {
+  margin: 16px 0 6px;
+  font-size: 13px;
+}
+
+.md p,
+.md li {
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.md ul {
+  margin: 0 0 8px;
+  padding-left: 1.2em;
+}
+
+.md li {
+  margin: 4px 0;
+}
+
+.md code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg-3);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.md a {
+  color: var(--accent);
+}
+
 /* ---------- toolbar ---------- */
 .toolbar {
   display: flex;

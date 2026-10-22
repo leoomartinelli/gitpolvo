@@ -922,6 +922,45 @@
     }
   }
 
+  class NotesTab {
+    constructor(app, md, version) {
+      this.app = app;
+      this.kind = 'notes';
+      this.title = 'Novidades';
+      this.md = md;
+      this.version = version;
+      this.page = h('div', { class: 'tab-page' });
+    }
+
+    dispose() {}
+
+    refresh() {
+      this.page.innerHTML = '';
+      this.page.append(
+        h(
+          'div',
+          { class: 'notes' },
+          h(
+            'div',
+            { class: 'notes-inner' },
+            h(
+              'div',
+              { class: 'notes-head' },
+              h('img', { src: ICON, alt: '' }),
+              h('div', {}, h('h1', {}, 'O que há de novo'), h('div', { class: 'dim' }, this.version ? `GitPolvo ${this.version}` : ''))
+            ),
+            UI.renderMarkdown(this.md),
+            h('div', { class: 'notes-actions' }, h('button', { class: 'btn primary', onclick: () => this.app.closeTab(this) }, 'Fechar'))
+          )
+        )
+      );
+    }
+
+    render() {
+      this.refresh();
+    }
+  }
+
   // ======================================================================
   // Aplicação: abas, comandos, atalhos
   // ======================================================================
@@ -1065,6 +1104,36 @@
       }
       if (!this.tabs.length) this.newTab();
       else this.activate(this.tabs[Math.min(s.activeTab || 0, this.tabs.length - 1)]);
+      await this.maybeOpenWhatsNew();
+    }
+
+    notesFingerprint(md) {
+      const m = /^##\s+(.+)$/m.exec(String(md || '').replace(/<!--[\s\S]*?-->/g, ''));
+      return m ? m[1].trim() : '';
+    }
+
+    async maybeOpenWhatsNew() {
+      try {
+        const [info, md] = await Promise.all([polvo.appInfo(), polvo.whatsNew()]);
+        const s = this.settings || {};
+        const fp = this.notesFingerprint(md);
+        const firstRun = !s.lastVersion && !(s.recent && s.recent.length) && !(s.openTabs && s.openTabs.length);
+        if (s.lastVersion === info.version || firstRun) {
+          if (firstRun) polvo.settings.set({ lastVersion: info.version, seenWhatsNew: fp });
+          return;
+        }
+        polvo.settings.set({ lastVersion: info.version, seenWhatsNew: fp });
+        if (md && md.replace(/<!--[\s\S]*?-->/g, '').trim()) this.addTab(new NotesTab(this, md, info.version));
+      } catch {
+        // sem notas: segue o baile
+      }
+    }
+
+    async openWhatsNew() {
+      const existing = this.tabs.find((t) => t.kind === 'notes');
+      if (existing) return this.activate(existing);
+      const [info, md] = await Promise.all([polvo.appInfo(), polvo.whatsNew()]);
+      this.addTab(new NotesTab(this, md || 'Nenhuma nota de versão ainda.', info.version));
     }
 
     persistTabs() {
@@ -1124,7 +1193,7 @@
               onclick: () => this.activate(t),
               onauxclick: (e) => e.button === 1 && this.closeTab(t),
             },
-            h('span', {}, t.kind === 'repo' ? '⑂' : '⌂'),
+            h('span', {}, t.kind === 'repo' ? '⑂' : t.kind === 'notes' ? '✦' : '⌂'),
             h('span', { class: 'tab-name' }, t.title),
             h(
               'button',
@@ -1250,6 +1319,7 @@
         [UI.avatars.enabled ? 'Desligar fotos de perfil' : 'Ligar fotos de perfil', 'view:avatars'],
         ['Atualizar fotos de perfil (limpar cache)', 'view:clearAvatars'],
         ['Atalhos de teclado', 'view:shortcuts'],
+        ['O que há de novo', 'help:whatsNew'],
         ['Sobre o GitPolvo', 'help:about'],
         ['Verificar atualizações', 'help:updates'],
       ];
@@ -1337,6 +1407,8 @@
           return this.showShortcuts();
         case 'help:about':
           return this.showAbout();
+        case 'help:whatsNew':
+          return this.openWhatsNew();
         case 'help:updates':
           return this.checkUpdates();
       }
