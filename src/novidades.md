@@ -7,10 +7,16 @@
   3. Liste as mudanças em bullets.
 
   Depois que o usuário atualizar, o GitPolvo abre uma guia temporária
-  com este arquivo. A release do GitHub usa o bloco ## mais recente.
+  só com os blocos ## que ele ainda não viu. Ajuda → O que há de novo
+  mostra o arquivo inteiro. A release do GitHub usa o bloco ## mais recente.
 -->
 
 # Novidades
+
+## Guia de novidades só lista o que mudou agora
+
+- Depois de atualizar, a guia temporária mostra apenas as notas novas, não o histórico inteiro
+- O histórico continua em Ajuda → O que há de novo
 
 ## Push pergunta o remoto quando a branch ainda não existe lá
 

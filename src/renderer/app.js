@@ -1214,23 +1214,53 @@
       await this.maybeOpenWhatsNew();
     }
 
-    notesFingerprint(md) {
-      const m = /^##\s+(.+)$/m.exec(String(md || '').replace(/<!--[\s\S]*?-->/g, ''));
-      return m ? m[1].trim() : '';
+    notesSections(md) {
+      const text = String(md || '')
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .trim();
+      const parts = text.split(/^## /m);
+      return parts.slice(1).map((p) => {
+        const nl = p.indexOf('\n');
+        const title = (nl < 0 ? p : p.slice(0, nl)).trim();
+        return { title, md: '## ' + p.trim() };
+      }).filter((s) => s.title);
+    }
+
+    unseenNotes(md, seen) {
+      const sections = this.notesSections(md);
+      const headings = sections.map((s) => s.title);
+      let unseen;
+      if (Array.isArray(seen)) {
+        const set = new Set(seen);
+        unseen = sections.filter((s) => !set.has(s.title));
+      } else if (typeof seen === 'string' && seen) {
+        const idx = sections.findIndex((s) => s.title === seen);
+        unseen = idx < 0 ? sections : sections.slice(0, idx);
+      } else {
+        unseen = sections;
+      }
+      return {
+        headings,
+        md: unseen.length ? '# Novidades\n\n' + unseen.map((s) => s.md).join('\n\n') : '',
+      };
     }
 
     async maybeOpenWhatsNew() {
       try {
         const [info, md] = await Promise.all([polvo.appInfo(), polvo.whatsNew()]);
         const s = this.settings || {};
-        const fp = this.notesFingerprint(md);
+        const { headings, md: snippet } = this.unseenNotes(md, s.seenWhatsNew);
         const firstRun = !s.lastVersion && !(s.recent && s.recent.length) && !(s.openTabs && s.openTabs.length);
-        if (s.lastVersion === info.version || firstRun) {
-          if (firstRun) polvo.settings.set({ lastVersion: info.version, seenWhatsNew: fp });
+        if (firstRun) {
+          polvo.settings.set({ lastVersion: info.version, seenWhatsNew: headings });
           return;
         }
-        polvo.settings.set({ lastVersion: info.version, seenWhatsNew: fp });
-        if (md && md.replace(/<!--[\s\S]*?-->/g, '').trim()) this.addTab(new NotesTab(this, md, info.version));
+        if (s.lastVersion === info.version) {
+          if (JSON.stringify(s.seenWhatsNew) !== JSON.stringify(headings)) polvo.settings.set({ seenWhatsNew: headings });
+          return;
+        }
+        polvo.settings.set({ lastVersion: info.version, seenWhatsNew: headings });
+        if (snippet) this.addTab(new NotesTab(this, snippet, info.version));
       } catch {
         // sem notas: segue o baile
       }
