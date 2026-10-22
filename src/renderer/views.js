@@ -142,8 +142,36 @@
   }
 
   // ---------- toolbar ----------
+  // Ícones SVG de traço fino, no lugar dos caracteres Unicode.
+  function tbSvg(inner) {
+    return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+  }
+  const TB = {
+    undo: '<path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.35"/><path d="M4.5 4.6v5.3h5.3"/>',
+    pull: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/>',
+    push: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/>',
+    fetch: '<path d="M20.5 3.2v5h-5"/><path d="M4 12a8 8 0 0 1 13.7-5.6L20.5 8.2"/><path d="M3.5 20.8v-5h5"/><path d="M20 12a8 8 0 0 1-13.7 5.6L3.5 15.8"/>',
+    branch:
+      '<circle cx="6.5" cy="5.5" r="2.2" fill="currentColor" stroke="none"/><circle cx="6.5" cy="18.5" r="2.2" fill="currentColor" stroke="none"/><circle cx="17.5" cy="10.5" r="2.2" fill="currentColor" stroke="none"/><path d="M6.5 7.7v8.6"/><path d="M6.5 9.8c0 3.6 11 1.2 11 0.7"/>',
+    stash: '<path d="M4 7.5h16l-2.2 5.2H6.2z"/><path d="M5.2 14h13.6L17 20.2H7z"/>',
+    pop: '<path d="M5 12h14v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2z"/><path d="M12 14V4"/><path d="M8 8l4-4 4 4"/>',
+    terminal: '<path d="M5 8l5 4-5 4"/><path d="M12 16h7"/>',
+    folder: '<path d="M3.5 7.5h5.2l1.8 2H20.5v9.2a1.3 1.3 0 0 1-1.3 1.3H4.8a1.3 1.3 0 0 1-1.3-1.3z"/><path d="M3.5 7.5V6.2A1.2 1.2 0 0 1 4.7 5h4.2"/>',
+    caret: '<svg viewBox="0 0 8 8" width="8" height="8"><path d="M1.6 2.6l2.4 2.8 2.4-2.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  };
+
   function tbButton(icon, label, title, onclick) {
-    return h('button', { class: 'tb-btn', title, onclick }, h('span', { class: 'ico' }, icon), label);
+    const ico = h('span', { class: 'ico', html: tbSvg(icon) });
+    const text = Array.isArray(label) ? h('span', { class: 'tb-label' }, ...label) : label;
+    return h('button', { class: 'tb-btn', title, onclick }, ico, text);
+  }
+
+  function pullOptions(tab) {
+    return [
+      { label: 'Pull (merge se necessário)', action: () => tab.pull('merge') },
+      { label: 'Pull (somente fast-forward)', action: () => tab.pull('ff-only') },
+      { label: 'Pull (rebase)', action: () => tab.pull('rebase') },
+    ];
   }
 
   function renderToolbar(tab) {
@@ -152,7 +180,18 @@
     const head = tab.data.head || {};
     const current = head.detached ? `HEAD (${head.sha})` : head.branch || '—';
     const localCur = (tab.data.refs?.local || []).find((b) => b.current);
-    const pullBtn = tbButton('⇣', 'Pull' + (localCur?.behind ? ` (${localCur.behind})` : ''), 'Pull (clique direito para opções)', () => tab.pull());
+    const pullCaret = h('span', {
+      class: 'tb-caret',
+      title: 'Opções de pull',
+      html: TB.caret,
+      onclick: (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const r = e.currentTarget.getBoundingClientRect();
+        showMenu(r.left, r.bottom + 4, pullOptions(tab));
+      },
+    });
+    const pullBtn = tbButton(TB.pull, ['Pull' + (localCur?.behind ? ` (${localCur.behind})` : ''), pullCaret], 'Pull', () => tab.pull());
     // três grupos: identificação à esquerda, comandos centralizados, busca à direita
     const left = h('div', { class: 'tb-left' });
     const center = h('div', { class: 'tb-center' });
@@ -173,26 +212,22 @@
       )
     );
     center.append(
-      tbButton('↶', 'Desfazer', 'Desfazer último commit (mantém alterações)', () => tab.undoCommit()),
+      tbButton(TB.undo, 'Desfazer', 'Desfazer último commit (mantém alterações)', () => tab.undoCommit()),
       h('div', { class: 'tb-sep' }),
       pullBtn,
-      tbButton('⇡', 'Push' + (localCur?.ahead ? ` (${localCur.ahead})` : ''), 'Push', () => tab.push()),
-      tbButton('⟳', 'Fetch', 'Fetch de todos os remotos (Ctrl+L)', () => tab.fetch()),
+      tbButton(TB.push, 'Push' + (localCur?.ahead ? ` (${localCur.ahead})` : ''), 'Push', () => tab.push()),
+      tbButton(TB.fetch, 'Fetch', 'Fetch de todos os remotos (Ctrl+L)', () => tab.fetch()),
       h('div', { class: 'tb-sep' }),
-      tbButton('⑂', 'Branch', 'Nova branch (Ctrl+B)', () => tab.createBranch()),
-      tbButton('⤓', 'Stash', 'Guardar alterações no stash', () => tab.stash()),
-      tbButton('⤒', 'Pop', 'Aplicar e remover o último stash', () => tab.stashPop()),
+      tbButton(TB.branch, 'Branch', 'Nova branch (Ctrl+B)', () => tab.createBranch()),
+      tbButton(TB.stash, 'Stash', 'Guardar alterações no stash', () => tab.stash()),
+      tbButton(TB.pop, 'Pop', 'Aplicar e remover o último stash', () => tab.stashPop()),
       h('div', { class: 'tb-sep' }),
-      tbButton('▤', 'Terminal', 'Abrir terminal externo nesta pasta', () => window.polvo.terminal(tab.repo.root)),
-      tbButton('📁', 'Pasta', 'Abrir no gerenciador de arquivos', () => window.polvo.reveal(tab.repo.root))
+      tbButton(TB.terminal, 'Terminal', 'Abrir terminal externo nesta pasta', () => window.polvo.terminal(tab.repo.root)),
+      tbButton(TB.folder, 'Pasta', 'Abrir no gerenciador de arquivos', () => window.polvo.reveal(tab.repo.root))
     );
     pullBtn.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      showMenu(e.clientX, e.clientY, [
-        { label: 'Pull (merge se necessário)', action: () => tab.pull('merge') },
-        { label: 'Pull (somente fast-forward)', action: () => tab.pull('ff-only') },
-        { label: 'Pull (rebase)', action: () => tab.pull('rebase') },
-      ]);
+      showMenu(e.clientX, e.clientY, pullOptions(tab));
     });
     if (tab.busy) right.append(h('div', { class: 'busy' }, h('div', { class: 'spinner' }), tab.busy));
     const search = h('input', { class: 'search', placeholder: 'Buscar commits (Ctrl+F)', spellcheck: 'false' });
@@ -286,7 +321,7 @@
           class: 'ref-item' + (b.current ? ' current' : ''),
           draggable: 'true',
           'data-ref': 'local:' + b.name,
-          title: (b.upstream ? `${b.name} → ${b.upstream}` : b.name) + (b.current && b.behind ? '\nDuplo clique: pull' : ''),
+          title: (b.upstream ? `${b.name} → ${b.upstream}` : b.name) + (b.behind ? (b.current ? '\nDuplo clique: pull' : '\nDuplo clique: checkout e pull') : ''),
           onclick: () => tab.selectSha(b.sha),
           ondblclick: () => tab.checkout(b.name),
           oncontextmenu: (e) => {
@@ -342,7 +377,7 @@
                 class: 'ref-item sub',
                 draggable: 'true',
                 'data-ref': 'remote:' + b.full,
-                title: local?.current && local.behind ? `${b.full}\nDuplo clique: pull` : b.full,
+                title: local?.behind ? `${b.full}\nDuplo clique: ${local.current ? 'pull' : 'checkout e pull'}` : b.full,
                 onclick: () => tab.selectSha(b.sha),
                 ondblclick: () => tab.checkoutRemote(b.full),
                 oncontextmenu: (e) => {
@@ -520,7 +555,7 @@
               title: (() => {
                 const short = r.name.slice(r.name.indexOf('/') + 1);
                 const local = (tab.data.refs?.local || []).find((l) => l.name === short);
-                return local?.current && local.behind ? `${r.name}\nDuplo clique: pull` : r.name;
+                return local?.behind ? `${r.name}\nDuplo clique: ${local.current ? 'pull' : 'checkout e pull'}` : r.name;
               })(),
               ondblclick: () => tab.checkoutRemote(r.name),
               oncontextmenu: (e) => {
@@ -565,7 +600,13 @@
               style: { background: `color-mix(in srgb, ${color} ${r.type === 'head' ? 62 : 35}%, var(--bg))` },
               title: (() => {
                 const local = (tab.data.refs?.local || []).find((l) => l.name === r.name);
-                const extra = local?.current && local.behind ? '\nDuplo clique: pull' : hasRemote ? ' (sincronizada com remoto)' : '';
+                const extra = local?.behind
+                  ? local.current
+                    ? '\nDuplo clique: pull'
+                    : '\nDuplo clique: checkout e pull'
+                  : hasRemote
+                    ? ' (sincronizada com remoto)'
+                    : '';
                 return r.name + extra;
               })(),
               ondblclick: () => tab.checkout(r.name),

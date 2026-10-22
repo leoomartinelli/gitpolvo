@@ -334,19 +334,46 @@ select:focus {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1px;
+  gap: 2px;
   background: none;
   border: none;
   border-radius: 6px;
-  padding: 3px 10px;
+  padding: 4px 10px;
   color: var(--text-dim);
   font-size: 11px;
 }
 
 .tb-btn .ico {
-  font-size: 16px;
-  line-height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   color: var(--text);
+}
+
+.tb-btn .ico svg {
+  display: block;
+}
+
+.tb-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tb-caret {
+  display: inline-flex;
+  align-items: center;
+  margin: -2px -6px -2px 0;
+  padding: 2px 4px;
+  border-radius: 3px;
+  opacity: 0.7;
+}
+
+.tb-caret:hover {
+  background: var(--bg-3);
+  opacity: 1;
 }
 
 .tb-btn:hover:not(:disabled) {

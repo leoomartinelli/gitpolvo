@@ -373,23 +373,23 @@
     }
 
     // ---------- branches ----------
-    // Duplo clique na branch atual (ou no remoto dela) quando o remoto está à
-    // frente: puxa os commits. Senão, checkout como antes.
+    // Duplo clique: se o remoto está à frente, troca para a branch (se
+    // preciso) e puxa para o local ficar igual ao remoto. Senão, só checkout.
     pullIfBehind(local) {
       return !!(local && local.current && local.behind);
     }
 
     async checkout(name) {
       const b = this.data.refs.local.find((x) => x.name === name);
-      if (this.pullIfBehind(b)) return this.pull();
-      if (b?.current) return;
-      return this.op(`Checkout de ${name}`, () => this.repo.run(['switch', name]), { success: `Agora em ${name}` });
+      if (b?.current) return b.behind ? this.pull() : undefined;
+      const behind = !!(b && b.behind);
+      const ok = await this.op(`Checkout de ${name}`, () => this.repo.run(['switch', name]), { success: behind ? undefined : `Agora em ${name}` });
+      if (ok && behind) return this.pull();
     }
 
     async checkoutRemote(full) {
       const name = full.slice(full.indexOf('/') + 1);
       const local = this.data.refs.local.find((b) => b.name === name);
-      if (this.pullIfBehind(local)) return this.pull();
       if (local) return this.checkout(name);
       return this.op(`Checkout de ${full}`, () => this.repo.run(['switch', '--track', '-c', name, full]), { success: `Branch ${name} criada rastreando ${full}` });
     }
@@ -773,7 +773,7 @@
       const isCur = name === cur;
       const b = this.data.refs.local.find((x) => x.name === name);
       return [
-        !isCur && { label: `Checkout de ${name}`, action: () => this.checkout(name) },
+        !isCur && { label: b?.behind ? `Checkout e pull de ${name}` : `Checkout de ${name}`, action: () => this.checkout(name) },
         !isCur && cur && { label: `Merge de ${name} em ${cur}`, action: () => this.merge(name) },
         !isCur && cur && { label: `Rebase de ${cur} sobre ${name}`, action: () => this.rebase(name) },
         isCur && { label: 'Pull', action: () => this.pull() },
@@ -796,7 +796,9 @@
       return [
         this.pullIfBehind(local)
           ? { label: `Pull (${local.behind} no remoto)`, action: () => this.pull() }
-          : { label: `Checkout (criar local ${name})`, action: () => this.checkoutRemote(full) },
+          : local
+            ? { label: local.behind ? `Checkout e pull de ${name}` : `Checkout de ${name}`, action: () => this.checkoutRemote(full) }
+            : { label: `Checkout (criar local ${name})`, action: () => this.checkoutRemote(full) },
         cur && { label: `Merge de ${full} em ${cur}`, action: () => this.merge(full) },
         cur && { label: `Rebase de ${cur} sobre ${full}`, action: () => this.rebase(full) },
         '-',
