@@ -409,6 +409,141 @@ select:focus {
   max-width: 220px;
 }
 
+.branch-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  min-width: 0;
+  margin-right: 8px;
+}
+
+.branch-busy-msg {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.polvo-busy-wrap {
+  display: flex;
+  line-height: 0;
+}
+
+.polvo-busy {
+  width: 34px;
+  height: 36px;
+  overflow: visible;
+  color: var(--accent);
+}
+
+.polvo-busy .pb-tents path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 14;
+  stroke-linecap: round;
+}
+
+.polvo-busy .pb-body > path {
+  fill: currentColor;
+}
+
+.polvo-busy .pb-body {
+  transform-origin: 128px 100px;
+  transform-box: view-box;
+  animation: splash-bob 2.4s ease-in-out infinite;
+}
+
+.polvo-busy .pb-eyes {
+  transform-origin: 128px 104px;
+  transform-box: view-box;
+  animation: splash-blink 4.2s ease-in-out infinite;
+}
+
+.polvo-busy .pb-t {
+  transform-box: view-box;
+  animation: pb-wiggle 1.15s ease-in-out infinite;
+}
+
+.polvo-busy .t1 {
+  transform-origin: 78px 140px;
+}
+
+.polvo-busy .t2 {
+  transform-origin: 100px 150px;
+  animation-delay: 0.12s;
+}
+
+.polvo-busy .t3 {
+  transform-origin: 128px 154px;
+  animation-name: pb-reach;
+  animation-duration: 1.35s;
+}
+
+.polvo-busy .t4 {
+  transform-origin: 156px 150px;
+  animation-delay: 0.18s;
+}
+
+.polvo-busy .t5 {
+  transform-origin: 178px 140px;
+  animation-delay: 0.06s;
+}
+
+.polvo-busy .dot {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pb-nibble 1.1s ease-in-out infinite;
+}
+
+.polvo-busy .t2 .dot {
+  animation-delay: 0.12s;
+}
+.polvo-busy .t3 .dot {
+  animation-delay: 0.24s;
+}
+.polvo-busy .t4 .dot {
+  animation-delay: 0.18s;
+}
+.polvo-busy .t5 .dot {
+  animation-delay: 0.06s;
+}
+
+@keyframes pb-wiggle {
+  0%,
+  100% {
+    transform: rotate(-9deg);
+  }
+  50% {
+    transform: rotate(9deg);
+  }
+}
+
+@keyframes pb-reach {
+  0%,
+  100% {
+    transform: scaleY(1);
+  }
+  50% {
+    transform: scaleY(1.14);
+  }
+}
+
+@keyframes pb-nibble {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(0.55);
+    opacity: 0.65;
+  }
+}
+
 .tb-btn {
   display: flex;
   flex-direction: column;
@@ -1369,13 +1504,15 @@ kbd {
 }
 
 .toast {
-  max-width: 440px;
+  max-width: 560px;
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-left: 4px solid var(--accent);
-  border-radius: 6px;
+  border-radius: 8px;
   box-shadow: var(--shadow);
-  padding: 10px 14px;
+  padding: 16px 20px;
+  font-size: 15px;
+  line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;

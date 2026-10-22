@@ -13,6 +13,11 @@
 
 # Novidades
 
+## Polvo na branch enquanto carrega
+
+- Operações Git (pull, push, fetch, checkout…) mostram o polvo animado ao lado da branch, com o nome do que está acontecendo
+- As notificações no canto da tela ficaram maiores e mais fáceis de ler
+
 ## Guia de novidades só lista o que mudou agora
 
 - Depois de atualizar, a guia temporária mostra apenas as notas novas, não o histórico inteiro

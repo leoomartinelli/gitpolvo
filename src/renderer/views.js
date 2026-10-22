@@ -167,6 +167,34 @@
     return h('button', { class: 'tb-btn', title, onclick }, ico, text);
   }
 
+  // Mini polvo da splash: tentáculos mexem e puxam os bloquinhos enquanto o Git trabalha.
+  function polvoBusySvg() {
+    return h(
+      'span',
+      {
+        class: 'polvo-busy-wrap',
+        html: `<svg class="polvo-busy" viewBox="20 28 216 214" aria-hidden="true">
+          <g class="pb-tents">
+            <g class="pb-t t1"><path d="M78 140 C60 170 40 175 34 200"/><circle class="dot" cx="34" cy="200" r="9" fill="#e3b341"/></g>
+            <g class="pb-t t2"><path d="M100 150 C95 185 80 200 82 222"/><circle class="dot" cx="82" cy="222" r="9" fill="#34d1bf"/></g>
+            <g class="pb-t t3"><path d="M128 154 C128 190 128 205 128 226"/><circle class="dot" cx="128" cy="226" r="9" fill="#e0675f"/></g>
+            <g class="pb-t t4"><path d="M156 150 C161 185 176 200 174 222"/><circle class="dot" cx="174" cy="222" r="9" fill="#a463f2"/></g>
+            <g class="pb-t t5"><path d="M178 140 C196 170 216 175 222 200"/><circle class="dot" cx="222" cy="200" r="9" fill="#5b8def"/></g>
+          </g>
+          <g class="pb-body">
+            <path d="M128 36 C178 36 196 76 196 108 C196 140 168 156 128 156 C88 156 60 140 60 108 C60 76 78 36 128 36 Z"/>
+            <g class="pb-eyes">
+              <circle cx="106" cy="104" r="12" fill="#1b1e24"/>
+              <circle cx="150" cy="104" r="12" fill="#1b1e24"/>
+              <circle cx="110" cy="100" r="4" fill="#fff"/>
+              <circle cx="154" cy="100" r="4" fill="#fff"/>
+            </g>
+          </g>
+        </svg>`,
+      }
+    );
+  }
+
   function pullOptions(tab) {
     return [
       { label: 'Pull (merge se necessário)', action: () => tab.pull('merge') },
@@ -212,6 +240,9 @@
         h('span', { class: 'val' }, '⎇ ', current)
       )
     );
+    if (tab.busy) {
+      left.append(h('div', { class: 'branch-busy', role: 'status', title: tab.busy }, polvoBusySvg(), h('span', { class: 'branch-busy-msg' }, tab.busy)));
+    }
     center.append(
       tbButton(TB.undo, 'Desfazer', 'Desfazer último commit (mantém alterações)', () => tab.undoCommit()),
       h('div', { class: 'tb-sep' }),
@@ -230,7 +261,6 @@
       e.preventDefault();
       showMenu(e.clientX, e.clientY, pullOptions(tab));
     });
-    if (tab.busy) right.append(h('div', { class: 'busy' }, h('div', { class: 'spinner' }), tab.busy));
     const search = h('input', { class: 'search', placeholder: 'Buscar commits (Ctrl+F)', spellcheck: 'false' });
     search.value = tab.search || '';
     search.addEventListener('input', () => {

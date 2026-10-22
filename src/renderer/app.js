@@ -659,7 +659,7 @@
       return this.op('Fetch', () => this.repo.run(['fetch', '--all', '--prune', '--tags']), { success: 'Fetch concluído' });
     }
 
-    // Fetch de fundo: não trava a barra com "Fetch..." (o manual continua com spinner).
+    // Fetch de fundo: não mostra o polvo de loading na branch (o manual continua mostrando).
     async fetchSilent({ background } = {}) {
       if (this.fetching || this.busy) return;
       if (background && this.skipAutoFetch) return;
