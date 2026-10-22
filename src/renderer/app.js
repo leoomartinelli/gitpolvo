@@ -2,7 +2,7 @@
 
 (() => {
   const { Repo, hunkPatch, layoutGraph, branchOwners } = window.GitLayer;
-  const { h, toast, form, prompt, confirmBox, palette, openModal } = window.UI;
+  const { h, toast, form, prompt, confirmBox, choices, palette, openModal } = window.UI;
   const V = window.Views;
   const polvo = window.polvo;
 
@@ -112,6 +112,17 @@
     hasWip() {
       const s = this.data.status;
       return !!s && (s.staged.length || s.unstaged.length || s.conflicts.length || !this.commits.length);
+    }
+
+    hasDirtyWorktree() {
+      const s = this.data.status;
+      return !!s && (s.staged.length || s.unstaged.length || s.conflicts.length);
+    }
+
+    wipCount() {
+      const s = this.data.status;
+      if (!s) return 0;
+      return new Set([...s.staged, ...s.unstaged, ...s.conflicts].map((f) => f.path)).size;
     }
 
     rowItems() {
@@ -379,9 +390,38 @@
       return !!(local && local.current && local.behind);
     }
 
+    // Sem commit, o git leva o WIP para a outra branch. Se a pessoa commit/push
+    // depois, o trabalho da branch anterior sobe sem ela ter pedido.
+    async confirmSwitchWithWip(toName) {
+      if (this.data.status?.conflicts?.length) {
+        toast('Resolva os conflitos antes de trocar de branch.', 'error');
+        return null;
+      }
+      if (!this.hasDirtyWorktree()) return 'bring';
+      const from = this.data.head.branch || 'HEAD';
+      const n = this.wipCount();
+      const pick = await choices(
+        'Alterações sem commit',
+        `Há ${n} arquivo(s) alterado(s) em "${from}".\nSe você trocar para "${toName}" levando essas alterações, elas passam a valer nessa branch. Um commit ou push depois mistura os dois trabalhos.`,
+        [
+          { id: 'cancel', label: 'Cancelar' },
+          { id: 'stash', label: 'Guardar no stash e trocar' },
+          { id: 'bring', label: 'Levar as alterações', primary: true },
+        ]
+      );
+      return !pick || pick === 'cancel' ? null : pick;
+    }
+
+    async stashThenSwitch(name) {
+      return this.op('Stash', () => this.repo.run(['stash', 'push', '--include-untracked', '-m', `WIP antes de ${name}`]), { success: 'Alterações guardadas no stash' });
+    }
+
     async checkout(name) {
       const b = this.data.refs.local.find((x) => x.name === name);
       if (b?.current) return b.behind ? this.pull() : undefined;
+      const how = await this.confirmSwitchWithWip(name);
+      if (!how) return;
+      if (how === 'stash' && !(await this.stashThenSwitch(name))) return;
       const behind = !!(b && b.behind);
       const ok = await this.op(`Checkout de ${name}`, () => this.repo.run(['switch', name]), { success: behind ? undefined : `Agora em ${name}` });
       if (ok && behind) return this.pull();
@@ -391,6 +431,9 @@
       const name = full.slice(full.indexOf('/') + 1);
       const local = this.data.refs.local.find((b) => b.name === name);
       if (local) return this.checkout(name);
+      const how = await this.confirmSwitchWithWip(name);
+      if (!how) return;
+      if (how === 'stash' && !(await this.stashThenSwitch(name))) return;
       return this.op(`Checkout de ${full}`, () => this.repo.run(['switch', '--track', '-c', name, full]), { success: `Branch ${name} criada rastreando ${full}` });
     }
 
@@ -490,6 +533,9 @@
 
     async mergeInto(src, dst) {
       if (dst !== this.data.head.branch) {
+        const how = await this.confirmSwitchWithWip(dst);
+        if (!how) return;
+        if (how === 'stash' && !(await this.stashThenSwitch(dst))) return;
         const ok = await this.op(`Checkout de ${dst}`, () => this.repo.run(['switch', dst]));
         if (!ok) return;
       }
@@ -660,17 +706,78 @@
       });
     }
 
+    pushRemote(b) {
+      if (!b?.upstream) return null;
+      const remotes = Object.keys(this.data.refs.remotes || {});
+      const hit = remotes.sort((a, c) => c.length - a.length).find((r) => b.upstream === r || b.upstream.startsWith(r + '/'));
+      return hit || b.upstream.split('/')[0];
+    }
+
+    async askPushUpstream(branch) {
+      const remotes = await this.repo.remoteNames();
+      if (!remotes.length) {
+        toast('Nenhum remoto configurado. Adicione um em "Remoto +" no painel esquerdo.', 'error');
+        return null;
+      }
+      const bar = this.els.pushAsk;
+      if (!bar) return this.pickRemote().then((remote) => (remote ? { remote, dest: branch } : null));
+      if (this._pushAskDone) this._pushAskDone(null);
+      return new Promise((resolve) => {
+        let settled = false;
+        const done = (val) => {
+          if (settled) return;
+          settled = true;
+          this._pushAskDone = null;
+          bar.classList.add('hidden');
+          bar.innerHTML = '';
+          resolve(val);
+        };
+        this._pushAskDone = done;
+        const def = remotes.includes('origin') ? 'origin' : remotes[0];
+        const sel = h('select', {}, remotes.map((r) => h('option', { value: r, selected: r === def }, r)));
+        const input = h('input', { value: branch, spellcheck: 'false' });
+        const submit = () => {
+          const dest = input.value.trim();
+          if (!dest) return toast('Informe o nome da branch no remoto.', 'error');
+          done({ remote: sel.value, dest });
+        };
+        const formEl = h(
+          'form',
+          {
+            class: 'push-ask-form',
+            onsubmit: (e) => {
+              e.preventDefault();
+              submit();
+            },
+          },
+          h('span', {}, `Qual remoto/branch a "${branch}" deve usar para push e pull?`),
+          sel,
+          h('span', { class: 'push-ask-slash' }, '/'),
+          input,
+          h('button', { type: 'submit', class: 'btn small primary' }, 'Enviar'),
+          h('button', { type: 'button', class: 'btn small', onclick: () => done(null) }, 'Cancelar')
+        );
+        bar.innerHTML = '';
+        bar.append(formEl);
+        bar.classList.remove('hidden');
+        input.focus();
+        input.select();
+      });
+    }
+
     async push(force) {
       const head = this.data.head;
       if (head.detached) return toast('Não é possível fazer push em detached HEAD.', 'error');
       const b = this.data.refs.local.find((x) => x.current);
       let args;
       if (b && b.upstream) {
-        args = ['push'];
+        const remote = this.pushRemote(b);
+        const dest = remote && b.upstream.startsWith(remote + '/') ? b.upstream.slice(remote.length + 1) : head.branch;
+        args = ['push', remote, `${head.branch}:${dest}`];
       } else {
-        const remote = await this.pickRemote();
-        if (!remote) return;
-        args = ['push', '-u', remote, head.branch];
+        const picked = await this.askPushUpstream(head.branch);
+        if (!picked) return;
+        args = ['push', '-u', picked.remote, `${head.branch}:${picked.dest}`];
       }
       if (force) args.push('--force-with-lease');
       return this.op('Push', async () => {
@@ -691,7 +798,7 @@
           }
           throw new Error(r.stderr || r.stdout);
         }
-        toast('Push concluído');
+        toast(`Push de ${head.branch} concluído`);
       });
     }
 

@@ -503,6 +503,38 @@ select:focus {
   }
 }
 
+.push-ask {
+  padding: 8px 14px;
+  background: var(--bg-3);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+.push-ask-form {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.push-ask select,
+.push-ask input {
+  width: auto;
+  min-width: 120px;
+  padding: 4px 8px;
+}
+
+.push-ask input {
+  min-width: 160px;
+}
+
+.push-ask-slash {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
 .banner {
   display: flex;
   align-items: center;
@@ -1261,6 +1293,7 @@ select:focus {
 .modal .actions {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 6px;
 }

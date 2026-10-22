@@ -108,6 +108,7 @@
       }
     });
     els.toolbar = h('div', { class: 'toolbar' });
+    els.pushAsk = h('div', { class: 'push-ask hidden' });
     els.banner = h('div', { class: 'banner hidden' });
     els.left = h('div', { class: 'left' });
     els.center = h('div', { class: 'center' });
@@ -135,7 +136,7 @@
     els.leftResizer = resizer(els.left, 'left');
     els.rightResizer = resizer(els.right, 'right');
     els.main = h('div', { class: 'main' }, els.left, els.leftResizer, els.center, els.rightResizer, els.right);
-    tab.page.append(els.toolbar, els.banner, els.main);
+    tab.page.append(els.toolbar, els.pushAsk, els.banner, els.main);
     installRefDnD(tab, els.left);
     installRefDnD(tab, els.center);
     renderToolbar(tab);

@@ -12,6 +12,15 @@
 
 # Novidades
 
+## Push pergunta o remoto quando a branch ainda não existe lá
+
+- Ao fazer push de uma branch nova, aparece a barra para escolher o remoto e o nome no servidor, como no GitKraken
+
+## Troca de branch não leva o WIP no automático
+
+- Ao trocar de branch com arquivos sem commit, o GitPolvo pergunta se você quer levar as alterações, guardar no stash, ou cancelar
+- O Push envia só a branch atual, nunca as outras locais de uma vez
+
 ## Splash, ícones e pull ao trocar de branch
 
 - Tela de abertura com o polvo puxando os bloquinhos coloridos

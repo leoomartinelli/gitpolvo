@@ -248,6 +248,35 @@ function confirmBox(title, message, ok = 'Confirmar') {
   return form(title, [], { ok, message }).then((r) => r !== null);
 }
 
+function choices(title, message, buttons) {
+  return new Promise((resolve) => {
+    openModal(
+      (close) =>
+        h(
+          'div',
+          { class: 'modal' },
+          h('h2', {}, title),
+          message ? h('div', { class: 'msg' }, message) : null,
+          h(
+            'div',
+            { class: 'actions' },
+            ...buttons.map((b) =>
+              h(
+                'button',
+                {
+                  class: 'btn' + (b.primary ? ' primary' : '') + (b.danger ? ' danger-bg' : ''),
+                  onclick: () => close(b.id),
+                },
+                b.label
+              )
+            )
+          )
+        ),
+      { onClose: resolve }
+    );
+  });
+}
+
 // ---------- paleta de comandos ----------
 function fuzzyScore(query, text) {
   const q = query.toLowerCase();
@@ -394,4 +423,4 @@ function renderMarkdown(md) {
   return root;
 }
 
-window.UI = { h, svg, laneColor, hashColor, avatar, avatars, relDate, fullDate, toast, showMenu, hideMenu, openModal, form, prompt, confirmBox, palette, renderMarkdown };
+window.UI = { h, svg, laneColor, hashColor, avatar, avatars, relDate, fullDate, toast, showMenu, hideMenu, openModal, form, prompt, confirmBox, choices, palette, renderMarkdown };
