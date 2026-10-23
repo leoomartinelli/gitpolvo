@@ -867,6 +867,43 @@ ipcMain.handle('shell:terminal', (_e, cwd) => {
   tryNext(0);
 });
 
+// Abre o arquivo no editor das preferências: o comando recebe o caminho no fim,
+// ou no lugar de {arquivo}. Sem comando, tenta o VS Code e depois o programa
+// padrão do sistema. Resolve false quando nada abriu.
+function splitCommand(cmd) {
+  const out = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(cmd))) out.push(m[1] ?? m[2] ?? m[3]);
+  return out;
+}
+
+function spawnDetached(cmd, args, cwd) {
+  return new Promise((resolve) => {
+    // no Windows editores como o code são .cmd e precisam do shell
+    const quoted = IS_WIN ? args.map((a) => (/\s/.test(a) ? `"${a}"` : a)) : args;
+    const child = spawn(cmd, quoted, { cwd, detached: true, stdio: 'ignore', shell: IS_WIN });
+    child.on('error', () => resolve(false));
+    child.on('spawn', () => {
+      child.unref();
+      resolve(true);
+    });
+  });
+}
+
+ipcMain.handle('shell:openEditor', async (_e, repo, rel, command) => {
+  const full = path.resolve(repo, rel);
+  if (!full.startsWith(path.resolve(repo) + path.sep)) return false;
+  const parts = splitCommand(String(command || '').trim());
+  if (parts.length) {
+    const args = parts.slice(1).map((a) => a.replace('{arquivo}', full));
+    if (!parts.some((a) => a.includes('{arquivo}'))) args.push(full);
+    return spawnDetached(parts[0].replace('{arquivo}', full), args, repo);
+  }
+  if (await spawnDetached('code', [full], repo)) return true;
+  return (await shell.openPath(full)) === '';
+});
+
 ipcMain.handle('fs:readFile', (_e, repo, rel) => {
   const full = path.resolve(repo, rel);
   if (!full.startsWith(path.resolve(repo) + path.sep)) return null;

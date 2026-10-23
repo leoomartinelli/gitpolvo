@@ -5,6 +5,7 @@
 
 (() => {
   const { h, svg, laneColor, avatar, relDate, fullDate, showMenu, openModal } = window.UI;
+  const HL = window.Highlight;
   const LW = 24;
   const NODE = 20; // diâmetro da foto no nó do grafo
   const CORNER = 12; // raio das dobras das linhas do grafo
@@ -775,11 +776,12 @@
     ['sha', 'SHA'],
   ];
 
-  // Diff unificado ou lado a lado, salvo nas configurações.
-  const diffPrefs = { split: false };
+  // Diff unificado ou lado a lado e "ignorar espaços", salvos nas configurações.
+  const diffPrefs = { split: false, ignoreWs: false };
 
-  function setDiffPrefs(split) {
+  function setDiffPrefs(split, ignoreWs = diffPrefs.ignoreWs) {
     diffPrefs.split = !!split;
+    diffPrefs.ignoreWs = !!ignoreWs;
   }
 
   function setColumnPrefs(prefs) {
@@ -1259,6 +1261,9 @@
                     { label: 'Copiar caminho', action: () => navigator.clipboard.writeText(f.path) },
                     !f.untracked && { label: 'Histórico do arquivo', action: () => tab.openHistory(f.path) },
                     !f.untracked && f.status !== 'D' && { label: 'Blame', action: () => tab.openBlame(f.path) },
+                    f.status !== 'D' && '-',
+                    f.status !== 'D' && { label: 'Editar arquivo', action: () => tab.openEditor(f.path) },
+                    f.status !== 'D' && { label: 'Abrir no editor externo', action: () => tab.openInEditor(f.path) },
                   ]);
                 },
                 actions: h(
@@ -1297,6 +1302,8 @@
                     { label: 'Unstage', action: () => tab.unstage([f.path]) },
                     { label: 'Histórico do arquivo', action: () => tab.openHistory(f.path) },
                     f.status !== 'D' && { label: 'Blame', action: () => tab.openBlame(f.path) },
+                    f.status !== 'D' && { label: 'Editar arquivo', action: () => tab.openEditor(f.path) },
+                    f.status !== 'D' && { label: 'Abrir no editor externo', action: () => tab.openInEditor(f.path) },
                   ]);
                 },
                 actions: h(
@@ -1432,6 +1439,7 @@
         showMenu(e.clientX, e.clientY, [
           { label: 'Histórico do arquivo', action: () => tab.openHistory(f.path) },
           f.status !== 'D' && { label: 'Blame neste commit', action: () => tab.openBlame(f.path, d.sha) },
+          f.status !== 'D' && { label: 'Abrir no editor externo', action: () => tab.openInEditor(f.path) },
           { label: 'Copiar caminho', action: () => navigator.clipboard.writeText(f.path) },
         ]);
       };
@@ -1528,7 +1536,49 @@
         },
         label
       );
-    return h('div', { class: 'seg' }, seg(false, 'Unificado'), seg(true, 'Lado a lado'));
+    return [
+      h(
+        'button',
+        {
+          class: 'btn small toggle' + (diffPrefs.ignoreWs ? ' on' : ''),
+          title: 'Esconder mudanças que são só espaço ou indentação',
+          onclick: () => {
+            diffPrefs.ignoreWs = !diffPrefs.ignoreWs;
+            window.polvo.settings.set({ diffIgnoreWs: diffPrefs.ignoreWs });
+            tab.reloadView();
+          },
+        },
+        diffPrefs.ignoreWs ? '✓ Ignorando espaços' : 'Ignorar espaços'
+      ),
+      h('div', { class: 'seg' }, seg(false, 'Unificado'), seg(true, 'Lado a lado')),
+    ];
+  }
+
+  // Realce de sintaxe e palavras alteradas de cada linha de um trecho. Os dois
+  // lados guardam seu próprio estado (comentário de bloco aberto etc.).
+  function hunkPaint(hk, lang) {
+    const info = new Map();
+    let oldSt = {};
+    let newSt = {};
+    for (const l of hk.lines) {
+      if (l.type === 'meta') continue;
+      if (!lang) {
+        info.set(l, { tokens: [] });
+        continue;
+      }
+      const r = HL.tokenize(l.text, lang, l.type === 'del' ? oldSt : newSt);
+      if (l.type !== 'add') oldSt = l.type === 'del' ? r.state : HL.tokenize(l.text, lang, oldSt).state;
+      if (l.type !== 'del') newSt = r.state;
+      info.set(l, { tokens: r.tokens });
+    }
+    for (const row of splitRows(hk)) {
+      if (row.left?.type === 'del' && row.right?.type === 'add') {
+        const [ra, rb] = HL.wordDiff(row.left.text, row.right.text);
+        info.get(row.left).marks = ra;
+        info.get(row.right).marks = rb;
+      }
+    }
+    return info;
   }
 
   // Linhas de remoção e adição de um trecho pareadas uma ao lado da outra.
@@ -1557,14 +1607,16 @@
 
   // Corpo do diff (unificado ou lado a lado). Com `pick`, as linhas alteradas
   // ficam clicáveis para stage/unstage/descarte por linha.
-  function diffBody(files, { pick, hunkActions } = {}) {
+  function diffBody(files, { pick, hunkActions, path } = {}) {
     const body = h('div', { class: 'diff-body' + (diffPrefs.split ? ' split' : '') });
+    const lang = HL.langOf(path);
     for (const f of files) {
       if (f.binary) {
         body.append(h('div', { class: 'empty' }, 'Arquivo binário — diff não exibido.'));
         continue;
       }
       for (const hk of f.hunks) {
+        const paint = hunkPaint(hk, lang);
         const cell = (l, side) => {
           if (!l) return h('div', { class: 'dl empty-side' }, h('span', { class: 'ln' }), h('span', { class: 'code' }));
           const n = side === 'left' ? l.old : side === 'right' ? l.new : null;
@@ -1573,7 +1625,7 @@
             'div',
             { class: 'dl ' + l.type + (canPick ? ' pickable' : '') + (canPick && pick.has(l) ? ' picked' : ''), title: canPick ? 'Clique para marcar a linha (Shift: intervalo)' : null },
             side ? h('span', { class: 'ln' }, n ?? '') : [h('span', { class: 'ln' }, l.old ?? ''), h('span', { class: 'ln' }, l.new ?? '')],
-            h('span', { class: 'code' }, l.text)
+            h('span', { class: 'code' }, HL.codeNodes(l.text, paint.get(l)?.tokens || [], paint.get(l)?.marks))
           );
           if (canPick) {
             el.line = l;
@@ -1607,11 +1659,14 @@
     const label = v.label || { unstaged: 'não preparado', untracked: 'novo arquivo', staged: 'preparado', commit: v.sha ? 'commit ' + v.sha.slice(0, 7) : '' }[v.kind];
     // barra das linhas marcadas: atualizada sem redesenhar o diff
     const pickBar = h('div', { class: 'pick-bar' });
-    const linesMode = v.kind === 'unstaged' || v.kind === 'staged';
+    // com espaços ignorados o diff não bate com o arquivo, então não dá para aplicar trechos
+    const linesMode = (v.kind === 'unstaged' || v.kind === 'staged') && !diffPrefs.ignoreWs;
     const updatePickBar = () => {
       pickBar.innerHTML = '';
       const n = v.picked ? v.picked.size : 0;
-      pickBar.classList.toggle('hidden', !linesMode);
+      const wsNote = (v.kind === 'unstaged' || v.kind === 'staged') && diffPrefs.ignoreWs;
+      pickBar.classList.toggle('hidden', !linesMode && !wsNote);
+      if (wsNote) return pickBar.append(h('span', { class: 'dim' }, 'Com "Ignorar espaços" ligado, o stage por linha e por hunk fica desligado.'));
       if (!linesMode) return;
       if (!n) return pickBar.append(h('span', { class: 'dim' }, 'Clique nas linhas verdes/vermelhas para escolher só algumas'));
       pickBar.append(h('span', {}, `${n} linha(s) marcada(s)`), h('span', { class: 'grow' }));
@@ -1642,12 +1697,30 @@
         { class: 'diff-head' },
         h('span', { class: 'path', title: v.file }, v.file),
         h('span', { class: 'dim' }, label),
-        actions,
-        diffModeToggle(tab),
-        v.kind !== 'untracked' ? h('button', { class: 'btn small', title: 'Commits que mexeram neste arquivo', onclick: () => tab.openHistory(v.file) }, 'Histórico') : null,
-        v.kind !== 'untracked' && v.kind !== 'staged'
-          ? h('button', { class: 'btn small', title: 'Quem mexeu em cada linha', onclick: () => tab.openBlame(v.file, v.kind === 'commit' ? v.sha : undefined) }, 'Blame')
-          : null,
+        h(
+          'div',
+          { class: 'head-tools' },
+          actions,
+          diffModeToggle(tab),
+          h(
+            'button',
+            {
+              class: 'btn small',
+              title: 'Histórico, blame e edição do arquivo',
+              onclick: (e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                const deleted = (v.files || []).some((f) => f.header.some((l) => l.startsWith('deleted file')));
+                showMenu(r.left, r.bottom + 4, [
+                  v.kind !== 'untracked' && { label: 'Histórico do arquivo', action: () => tab.openHistory(v.file) },
+                  v.kind !== 'untracked' && v.kind !== 'staged' && { label: v.kind === 'commit' ? 'Blame neste commit' : 'Blame', action: () => tab.openBlame(v.file, v.kind === 'commit' ? v.sha : undefined) },
+                  v.kind !== 'commit' && !deleted && { label: 'Editar arquivo', action: () => tab.openEditor(v.file) },
+                  !deleted && { label: 'Abrir no editor externo', action: () => tab.openInEditor(v.file) },
+                ]);
+              },
+            },
+            'Arquivo ▾'
+          )
+        ),
         h('button', { class: 'icon-btn', title: 'Fechar (Esc)', onclick: () => tab.closeView() }, '✕')
       ),
       pickBar
@@ -1655,7 +1728,9 @@
     updatePickBar();
     const files = v.files || [];
     if (!files.length) {
-      C.append(h('div', { class: 'empty' }, v.loading ? 'Carregando...' : 'Sem diferenças de conteúdo (talvez apenas permissão ou renomeação).'));
+      C.append(
+        h('div', { class: 'empty' }, v.loading ? 'Carregando...' : diffPrefs.ignoreWs ? 'Só mudaram espaços ou indentação (desligue "Ignorar espaços" para ver).' : 'Sem diferenças de conteúdo (talvez apenas permissão ou renomeação).')
+      );
       return;
     }
     v.picked ||= new Set();
@@ -1668,6 +1743,7 @@
       },
     };
     const hunkActions = (f, hk) => {
+      if (diffPrefs.ignoreWs) return null;
       if (v.kind === 'unstaged')
         return [
           h('button', { class: 'btn small danger', onclick: () => tab.discardHunk(f, hk) }, 'Descartar hunk'),
@@ -1676,9 +1752,73 @@
       if (v.kind === 'staged') return h('button', { class: 'btn small', onclick: () => tab.unstageHunk(f, hk) }, 'Unstage hunk');
       return null;
     };
-    const body = diffBody(files, { pick, hunkActions });
+    const body = diffBody(files, { pick, hunkActions, path: v.file });
     C.append(body);
     body.scrollTop = prevScroll;
+  }
+
+  // ---------- editor embutido ----------
+  // Campo de texto com numeração de linhas; Tab indenta no estilo do arquivo e
+  // Ctrl+S salva. O que não foi salvo fica em tab.editDrafts.
+  function renderEditor(tab) {
+    const C = tab.els.center;
+    const v = tab.view;
+    const prev = C.querySelector('.editor-area');
+    const keep = prev ? [prev.scrollTop, prev.selectionStart, prev.selectionEnd, document.activeElement === prev] : null;
+    C.innerHTML = '';
+    const dirty = () => v.content !== v.original;
+    const status = h('span', { class: 'dim' });
+    const save = h('button', { class: 'btn small primary', onclick: () => tab.saveEdit() }, 'Salvar (Ctrl+S)');
+    const update = () => {
+      status.textContent = dirty() ? '● não salvo' : 'salvo';
+      status.classList.toggle('unsaved', dirty());
+      save.disabled = !dirty();
+    };
+    C.append(
+      h(
+        'div',
+        { class: 'diff-head' },
+        h('span', { class: 'path', title: v.file }, v.file),
+        status,
+        h('button', { class: 'btn small', title: 'Abrir no editor externo', onclick: () => tab.openInEditor(v.file) }, 'Abrir no editor'),
+        save,
+        h('button', { class: 'icon-btn', title: 'Fechar', onclick: () => tab.closeView() }, '✕')
+      )
+    );
+    const gutter = h('div', { class: 'editor-gutter' });
+    const area = h('textarea', { class: 'editor-area', spellcheck: 'false', wrap: 'off' });
+    area.value = v.content;
+    const lines = () => {
+      const n = area.value.split('\n').length;
+      if (gutter.childElementCount === n) return;
+      gutter.textContent = Array.from({ length: n }, (_, i) => i + 1).join('\n');
+    };
+    // indentação do arquivo: tab se a maioria das linhas indentadas usa tab
+    const tabs = (v.original.match(/^\t/gm) || []).length;
+    const spaces = (v.original.match(/^ {2,}/gm) || []).length;
+    const indent = tabs > spaces ? '\t' : (/^( {2,})\S/m.exec(v.original)?.[1].length === 4 ? '    ' : '  ');
+    area.addEventListener('keydown', (e) => {
+      if (e.key !== 'Tab' || e.ctrlKey || e.metaKey) return;
+      e.preventDefault();
+      document.execCommand('insertText', false, indent);
+    });
+    area.addEventListener('input', () => {
+      v.content = area.value;
+      if (dirty()) tab.editDrafts[v.file] = { original: v.original, content: v.content };
+      else delete tab.editDrafts[v.file];
+      lines();
+      update();
+    });
+    area.addEventListener('scroll', () => (gutter.scrollTop = area.scrollTop));
+    C.append(h('div', { class: 'editor' }, gutter, area));
+    lines();
+    update();
+    if (keep) {
+      area.scrollTop = keep[0];
+      area.setSelectionRange(keep[1], keep[2]);
+      if (keep[3]) area.focus();
+    } else area.focus();
+    gutter.scrollTop = area.scrollTop;
   }
 
   // ---------- blame ----------
@@ -1788,7 +1928,8 @@
     );
     C.append(list);
     list.scrollTop = prevList;
-    const body = v.diffLoading ? h('div', { class: 'diff-body' }, h('div', { class: 'empty' }, 'Carregando...')) : diffBody(v.files);
+    const selEntry = v.entries.find((x) => x.sha === v.sel);
+    const body = v.diffLoading ? h('div', { class: 'diff-body' }, h('div', { class: 'empty' }, 'Carregando...')) : diffBody(v.files, { path: selEntry?.path || v.file });
     if (!v.diffLoading && !v.files.length) body.append(h('div', { class: 'empty' }, 'Sem diferenças de conteúdo neste commit.'));
     C.append(body);
     body.scrollTop = prevDiff;
@@ -2151,5 +2292,5 @@
     });
   }
 
-  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, renderHistory, renderBlame, rebaseEditor, messageEditor, setDiffPrefs, ROW_H };
+  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, renderHistory, renderBlame, renderEditor, rebaseEditor, messageEditor, setDiffPrefs, diffPrefs, ROW_H };
 })();

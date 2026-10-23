@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('polvo', {
   pickDir: (title) => ipcRenderer.invoke('dialog:pickDir', title),
   reveal: (p) => ipcRenderer.invoke('shell:reveal', p),
   terminal: (cwd) => ipcRenderer.invoke('shell:terminal', cwd),
+  openEditor: (repo, rel, command) => ipcRenderer.invoke('shell:openEditor', repo, rel, command),
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   readFile: (repo, rel) => ipcRenderer.invoke('fs:readFile', repo, rel),
   writeFile: (repo, rel, content) => ipcRenderer.invoke('fs:writeFile', repo, rel, content),

@@ -213,15 +213,17 @@ class Repo {
 
   // kind: 'unstaged' | 'staged' | 'untracked' | 'commit'
   // from: caminho antigo, quando o arquivo foi renomeado no commit
-  async diff(kind, file, sha, parents, from) {
+  // ignoreWs: esconde mudanças que são só espaço (git diff -w)
+  async diff(kind, file, sha, parents, from, { ignoreWs = false } = {}) {
     const paths = from && from !== file ? [from, file] : [file];
+    const ws = ignoreWs ? ['-w'] : [];
     let r;
-    if (kind === 'unstaged') r = await this.raw(['diff', '--no-color', '--no-ext-diff', '--', file]);
-    else if (kind === 'staged') r = await this.raw(['diff', '--cached', '--no-color', '--no-ext-diff', '--', file]);
-    else if (kind === 'untracked') r = await this.raw(['diff', '--no-color', '--no-index', '--', '/dev/null', file]);
+    if (kind === 'unstaged') r = await this.raw(['diff', '--no-color', '--no-ext-diff', ...ws, '--', file]);
+    else if (kind === 'staged') r = await this.raw(['diff', '--cached', '--no-color', '--no-ext-diff', ...ws, '--', file]);
+    else if (kind === 'untracked') r = await this.raw(['diff', '--no-color', '--no-index', ...ws, '--', '/dev/null', file]);
     else if (parents && parents.length)
-      r = await this.raw(['diff', '--no-color', '--no-ext-diff', '-M', parents[0], sha, '--', ...paths]);
-    else r = await this.raw(['show', '--no-color', '--format=', sha, '--', file]);
+      r = await this.raw(['diff', '--no-color', '--no-ext-diff', '-M', ...ws, parents[0], sha, '--', ...paths]);
+    else r = await this.raw(['show', '--no-color', '--format=', ...ws, sha, '--', file]);
     return parseDiff(r.stdout);
   }
 

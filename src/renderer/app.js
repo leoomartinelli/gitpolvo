@@ -26,6 +26,7 @@
       this.compare = null; // { a, b, labelA, labelB, files, counts } da comparação aberta
       this.logLimit = LOG_PAGE;
       this.filters = null; // branches escondidas/solo no grafo, lidas das configurações
+      this.editDrafts = {}; // edições não salvas do editor embutido, por arquivo
       this.undoStack = []; // ações que o botão Desfazer sabe reverter (só nesta sessão)
       this.redoStack = [];
       this.view = { type: 'graph' };
@@ -319,6 +320,7 @@
       if (this.view.type === 'diff') V.renderDiff(this);
       else if (this.view.type === 'history') V.renderHistory(this);
       else if (this.view.type === 'blame') V.renderBlame(this);
+      else if (this.view.type === 'edit') V.renderEditor(this);
       else if (this.view.type === 'conflict') V.renderConflict(this);
       else V.renderGraph(this);
     }
@@ -675,7 +677,7 @@
           return;
         }
       }
-      const files = await this.repo.diff(kind, v.file, v.sha, v.parents);
+      const files = await this.repo.diff(kind, v.file, v.sha, v.parents, null, { ignoreWs: V.diffPrefs.ignoreWs });
       if (this.view !== v) return;
       const diffSig = JSON.stringify(files);
       if (kind === v.kind && !v.loading && diffSig === v.diffSig) return;
@@ -685,10 +687,63 @@
       V.renderRight(this);
     }
 
-    closeView() {
+    // Relê o diff aberto (ex.: depois de trocar "Ignorar espaços").
+    reloadView() {
+      const v = this.view;
+      if (v.type === 'diff') {
+        v.diffSig = null;
+        return this.reloadDiff();
+      }
+      if (v.type === 'history') {
+        const e = v.entries.find((x) => x.sha === v.sel);
+        if (e) return this.historySelect(e);
+      }
+      this.renderCenter();
+    }
+
+    async closeView() {
+      const v = this.view;
+      if (v.type === 'edit' && v.content !== v.original) {
+        if (!(await confirmBox('Edição não salva', `Descartar as mudanças em "${v.file}"?`, 'Descartar'))) return;
+        delete this.editDrafts[v.file];
+      }
       this.view = { type: 'graph' };
       this.renderCenter();
       V.renderRight(this);
+    }
+
+    // ---------- editor embutido ----------
+    // Se a pessoa saiu do editor sem salvar, a edição fica guardada e volta ao
+    // reabrir o arquivo, desde que ele não tenha mudado no disco nesse meio-tempo.
+    async openEditor(file) {
+      const disk = await polvo.readFile(this.repo.root, file);
+      if (disk == null) return toast(`Não foi possível ler "${file}".`, 'error');
+      if (disk.includes('\0')) return toast('Arquivo binário: abra no editor externo.', 'error');
+      const draft = this.editDrafts[file];
+      const restored = draft && draft.original === disk;
+      this.view = { type: 'edit', file, original: disk, content: restored ? draft.content : disk };
+      if (restored) toast('Edição não salva restaurada.');
+      this.renderCenter();
+    }
+
+    async saveEdit() {
+      const v = this.view;
+      if (v.type !== 'edit') return;
+      const disk = await polvo.readFile(this.repo.root, v.file);
+      if (disk != null && disk !== v.original && !(await confirmBox('Arquivo mudou', `"${v.file}" foi alterado fora do GitPolvo desde que você abriu. Salvar por cima?`, 'Salvar mesmo assim'))) return;
+      await polvo.writeFile(this.repo.root, v.file, v.content);
+      v.original = v.content;
+      delete this.editDrafts[v.file];
+      toast(`${v.file} salvo`);
+      this.renderCenter();
+      this.refresh();
+    }
+
+    // Editor de fora: o comando das preferências ou, sem ele, VS Code / programa padrão.
+    async openInEditor(file) {
+      const s = this.app.settings || (await polvo.settings.get());
+      const ok = await polvo.openEditor(this.repo.root, file, s.editorCmd || '');
+      if (!ok) toast(s.editorCmd ? `Não consegui rodar "${s.editorCmd}". Confira o editor nas Preferências.` : 'Não encontrei um editor para abrir o arquivo. Escolha um nas Preferências.', 'error');
     }
 
     // ---------- blame ----------
@@ -733,7 +788,7 @@
       if (v.type !== 'history') return;
       Object.assign(v, { sel: entry.sha, files: [], diffLoading: true });
       this.renderCenter();
-      const files = await this.repo.diff('commit', entry.path, entry.sha, entry.parents, entry.from);
+      const files = await this.repo.diff('commit', entry.path, entry.sha, entry.parents, entry.from, { ignoreWs: V.diffPrefs.ignoreWs });
       if (this.view !== v || v.sel !== entry.sha) return;
       Object.assign(v, { files, diffLoading: false });
       this.renderCenter();
@@ -1182,7 +1237,7 @@
           return { sha, parents: parents.split(' ').filter(Boolean), author, message: message.trim() };
         });
       if (!commits.length) return toast('Não há commits depois desse para reorganizar.'), null;
-      if (commits.some((c) => c.parents.length > 1)) return toast('Há merges nesse intervalo. O rebase interativo só reorganiza commits sem merge.', 'error'), null;
+      if (commits.some((c) => c.parents.length > 1)) return toast('Há commits de merge depois desse. Por aqui só dá para reescrever o histórico quando não há merge no caminho.', 'error'), null;
       return commits;
     }
 
@@ -1215,6 +1270,31 @@
         }
         toast(`${name} concluído`);
       }, { undoHead: 'keep', undoLabel: label });
+    }
+
+    // Troca a mensagem de um commit: o último vai por amend; um antigo, por um
+    // rebase que reaplica os commits seguintes.
+    async rewordCommit(c) {
+      if (this.data.state !== 'clean') return toast('Finalize ou aborte a operação em andamento primeiro.', 'error');
+      const isHead = c.sha === this.headSha;
+      if (!isHead && !c.parents.length) return toast('Não dá para editar a mensagem do primeiro commit do repositório por aqui.', 'error');
+      // confere antes de pedir a mensagem, para não perder o que a pessoa digitou
+      const base = c.parents[0];
+      const commits = isHead ? null : await this.rebaseCommits(base);
+      if (!isHead && !commits) return;
+      if (!isHead && !commits.some((x) => x.sha === c.sha)) return toast(`Esse commit não faz parte da branch ${this.data.head.branch}.`, 'error');
+      const full = (await this.repo.run(['log', '-1', '--format=%B', c.sha])).trim();
+      const message = await V.messageEditor('Editar mensagem do commit', full, {
+        ok: 'Salvar mensagem',
+        message: isHead
+          ? 'Troca só a mensagem do último commit (amend). Se ele já foi enviado, o próximo push vai precisar ser forçado.'
+          : 'Reaplica os commits depois deste para trocar a mensagem. Isso reescreve o histórico: se já foram enviados, o próximo push vai precisar ser forçado.',
+      });
+      if (message == null || message === full) return;
+      const label = `mensagem de ${c.sha.slice(0, 7)}`;
+      if (isHead) return this.op('Editar mensagem', () => this.repo.run(['commit', '--amend', '--only', '--allow-empty', '-q', '-F', '-'], message), { undoHead: 'soft', undoLabel: label });
+      const plan = commits.map((x) => (x.sha === c.sha ? { sha: x.sha, action: 'reword', message, original: '' } : { sha: x.sha, action: 'pick', message: x.message, original: x.message }));
+      return this.runRebasePlan(base, plan, label);
     }
 
     // Junta commits seguidos da branch atual num só, com a mensagem escolhida.
@@ -1648,6 +1728,7 @@
         { label: 'Reverter commit', action: () => this.revert(c.sha) },
         cur && { label: `Reset de ${cur} para este commit...`, action: () => this.reset(c.sha) },
         cur && c.sha !== this.headSha && { label: `Rebase interativo de ${cur} a partir daqui...`, action: () => this.interactiveRebase(c.sha) },
+        cur && { label: 'Editar mensagem...', action: () => this.rewordCommit(c) },
         '-',
         c.sha !== this.headSha && { label: 'Comparar com o HEAD', action: () => this.compareRefs(c.sha, 'HEAD', c.sha.slice(0, 7), 'HEAD') },
         { label: 'Copiar SHA', action: () => this.copy(c.sha) },
@@ -1899,7 +1980,7 @@
       document.documentElement.dataset.theme = s.theme || 'dark';
       UI.avatars.enabled = s.avatars !== false;
       V.setColumnPrefs(s.columns);
-      V.setDiffPrefs(s.diffSplit);
+      V.setDiffPrefs(s.diffSplit, s.diffIgnoreWs);
       this.startAutoFetch();
       for (const p of s.openTabs || []) {
         const v = await polvo.repo.validate(p);
@@ -2171,6 +2252,8 @@
         { name: 'theme', label: 'Tema', value: document.documentElement.dataset.theme || 'dark', options: [{ value: 'dark', label: 'Escuro' }, { value: 'light', label: 'Claro' }] },
         { name: 'diffSplit', label: 'Diff', value: s.diffSplit ? 'split' : 'unified', options: [{ value: 'unified', label: 'Unificado' }, { value: 'split', label: 'Lado a lado' }] },
         { name: 'avatars', label: 'Mostrar fotos de perfil dos autores', type: 'checkbox', value: UI.avatars.enabled },
+        { section: 'Editor externo', note: 'Comando usado em "Abrir no editor". Vazio: VS Code (code), se houver, senão o programa padrão do sistema. Use {arquivo} para escolher onde vai o caminho.' },
+        { name: 'editorCmd', label: 'Comando', value: s.editorCmd || '', placeholder: 'code   ·   subl   ·   phpstorm   ·   gedit {arquivo}' },
         { section: 'Novos repositórios' },
         { name: 'defBranch', label: 'Nome da branch inicial', value: defBranch, placeholder: 'main' },
       ];
@@ -2192,7 +2275,7 @@
       document.documentElement.dataset.theme = r.theme;
       UI.avatars.enabled = r.avatars;
       V.setDiffPrefs(r.diffSplit === 'split');
-      this.settings = await polvo.settings.set({ theme: r.theme, avatars: r.avatars, diffSplit: r.diffSplit === 'split', autoFetch: r.autoFetch, fetchInterval: Number(r.fetchInterval) });
+      this.settings = await polvo.settings.set({ theme: r.theme, avatars: r.avatars, diffSplit: r.diffSplit === 'split', autoFetch: r.autoFetch, fetchInterval: Number(r.fetchInterval), editorCmd: r.editorCmd.trim() });
       this.startAutoFetch();
       toast('Preferências salvas');
       if (this.active) this.active.render();
@@ -2404,6 +2487,10 @@
         const tab = this.tabs[+e.key - 1];
         if (tab) this.activate(tab);
         return;
+      }
+      if (t && t.view.type === 'edit' && mod && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        return t.saveEdit();
       }
       if (inField || !t) return;
       if (mod && !e.altKey && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {

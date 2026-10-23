@@ -13,6 +13,14 @@
 
 # Novidades
 
+## Realce de sintaxe, editor embutido e mensagem de commits antigos
+
+- O diff tem realce de sintaxe (PHP, JavaScript/TypeScript, Python, Java, C#, Go, SQL, CSS, HTML, JSON, shell e outras) e destaca as palavras que mudaram dentro da linha
+- Botão "Ignorar espaços" no diff para esconder mudanças que são só indentação
+- "Editar mensagem..." no menu do commit troca a mensagem do último commit ou de um commit antigo
+- Editor embutido: "Editar arquivo" no menu do arquivo ou em "Arquivo ▾" no diff, com Ctrl+S para salvar; o que não foi salvo volta ao reabrir
+- "Abrir no editor externo" abre o arquivo no VS Code ou no editor escolhido nas Preferências
+
 ## Blame, editor de conflitos e preferências
 
 - Blame: veja quem alterou cada linha de um arquivo (botão no diff, no histórico ou botão direito no arquivo); clique no trecho para ir ao commit
