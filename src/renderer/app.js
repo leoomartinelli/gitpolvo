@@ -69,6 +69,7 @@
         this.headSha = headSha;
         if (this.github === undefined) this.github = await this.detectGithub();
         this._rowItems = null;
+        this.rowItems(); // já reserva as colunas extras dos stashes antes de medir o grafo
         if (this.selected !== 'WIP' && !this.shaIndex.has(this.selected) && !this.selectedIsStash) this.selected = 'WIP';
         this.render();
         if (this.view.type === 'diff') this.reloadDiff();
@@ -128,22 +129,45 @@
     rowItems() {
       if (this._rowItems) return this._rowItems;
       const items = [];
+      // Cada stash fica logo acima do commit de onde saiu; os de base fora do
+      // histórico carregado aparecem só na lista da esquerda.
+      const stashesAt = new Map();
       for (const s of this.data.stashes || []) {
-        items.push({
-          type: 'stash',
-          stash: s,
-          g: { col: 0 },
-          searchText: `${s.msg || ''} ${s.ref || ''}`.toLowerCase(),
-        });
+        const idx = this.shaIndex?.get(s.parent);
+        if (idx == null) continue;
+        if (!stashesAt.has(idx)) stashesAt.set(idx, []);
+        stashesAt.get(idx).push(s);
       }
+      const headIdx = this.shaIndex?.get(this.headSha);
+      const wipLine = this.hasWip() && this.commits.length && headIdx === 0;
       if (this.hasWip() && this.commits.length) {
-        const headIdx = this.shaIndex.get(this.headSha);
         const col = headIdx != null ? this.layout.rows[headIdx].col : 0;
-        items.push({ type: 'wip', g: { col, lineDown: headIdx === 0 } });
+        items.push({ type: 'wip', g: { col, lineDown: wipLine } });
       }
-      this.commits.forEach((c, i) =>
-        items.push({ type: 'commit', c, g: this.layout.rows[i], owner: this.owners[i], searchText: `${c.subject}\n${c.bodyLine}\n${c.author}\n${c.email}\n${c.sha}`.toLowerCase() })
-      );
+      this.commits.forEach((c, i) => {
+        let g = this.layout.rows[i];
+        const stashes = stashesAt.get(i);
+        if (stashes) {
+          // linhas que já atravessam o espaço entre o commit anterior e este
+          const pass = [...new Set([...g.pass, ...g.incoming])];
+          const wipPass = wipLine && i === 0 ? g.col : null;
+          const busy = new Set(pass);
+          if (wipPass != null) busy.add(wipPass);
+          let lane = g.col;
+          if (busy.has(lane)) for (lane = 0; busy.has(lane); lane++);
+          this.layout.maxLanes = Math.max(this.layout.maxLanes, lane + 1);
+          stashes.forEach((s, k) =>
+            items.push({
+              type: 'stash',
+              stash: s,
+              g: { col: lane, pass, wipPass, lineUp: k > 0, toCol: k === stashes.length - 1 ? g.col : lane },
+              searchText: `${s.msg || ''} ${s.ref || ''}`.toLowerCase(),
+            })
+          );
+          if (!g.incoming.includes(g.col)) g = { ...g, stashIn: true };
+        }
+        items.push({ type: 'commit', c, g, owner: this.owners[i], searchText: `${c.subject}\n${c.bodyLine}\n${c.author}\n${c.email}\n${c.sha}`.toLowerCase() });
+      });
       return (this._rowItems = items);
     }
 

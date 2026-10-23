@@ -8,6 +8,7 @@
   const LW = 24;
   const NODE = 20; // diâmetro da foto no nó do grafo
   const CORNER = 12; // raio das dobras das linhas do grafo
+  const STASH_COLOR = '#e3b341';
   const ICON_LAPTOP =
     '<svg viewBox="0 0 16 16" width="12" height="12"><rect x="3" y="3.5" width="10" height="6.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M1 12.5h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
   // ícone de remoto: cubo laranja
@@ -497,10 +498,25 @@
     const xc = X(g.col);
     const color = laneColor(g.col);
     const s = svg('svg', { width: W, height: H });
-    if (opts.wip || opts.stash) {
-      const stroke = opts.stash ? '#e3b341' : color;
-      if (g.lineDown) s.append(svg('line', { x1: xc, y1: mid + NODE / 2, x2: xc, y2: H, stroke: stroke, 'stroke-width': 2, 'stroke-dasharray': '3 3' }));
-      s.append(svg('circle', { cx: xc, cy: mid, r: NODE / 2 - 1, fill: 'none', stroke: stroke, 'stroke-width': 2, 'stroke-dasharray': '3 2.5' }));
+    if (opts.wip) {
+      if (g.lineDown) s.append(svg('line', { x1: xc, y1: mid + NODE / 2, x2: xc, y2: H, stroke: color, 'stroke-width': 2, 'stroke-dasharray': '3 3' }));
+      s.append(svg('circle', { cx: xc, cy: mid, r: NODE / 2 - 1, fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-dasharray': '3 2.5' }));
+      return s;
+    }
+    if (opts.stash) {
+      // linha tracejada do stash até o commit de onde ele saiu (na linha de baixo)
+      const dashed = (d, stroke) => s.append(svg('path', { d, stroke, 'stroke-width': 2, fill: 'none', 'stroke-dasharray': '3 3' }));
+      for (const i of g.pass) s.append(svg('line', { x1: X(i), y1: 0, x2: X(i), y2: H, stroke: laneColor(i), 'stroke-width': 2 }));
+      if (g.wipPass != null) dashed(`M ${X(g.wipPass)} 0 L ${X(g.wipPass)} ${H}`, laneColor(g.wipPass));
+      if (g.lineUp) dashed(`M ${xc} 0 L ${xc} ${mid - NODE / 2}`, STASH_COLOR);
+      if (g.toCol === g.col) dashed(`M ${xc} ${mid + NODE / 2} L ${xc} ${H}`, STASH_COLOR);
+      else {
+        const xj = X(g.toCol);
+        const dir = Math.sign(xj - xc);
+        const r = Math.min(CORNER, Math.abs(xj - xc), mid);
+        dashed(`M ${xc + (dir * NODE) / 2} ${mid} L ${xj - dir * r} ${mid} A ${r} ${r} 0 0 ${dir > 0 ? 1 : 0} ${xj} ${mid + r} L ${xj} ${H}`, STASH_COLOR);
+      }
+      s.append(svg('circle', { cx: xc, cy: mid, r: NODE / 2 - 1, fill: 'none', stroke: STASH_COLOR, 'stroke-width': 2, 'stroke-dasharray': '3 2.5' }));
       return s;
     }
     // faixa translúcida da cor da linha, do nó até a mensagem
@@ -533,6 +549,7 @@
       const dir = Math.sign(xj - xc);
       edge(`M ${xc} ${mid} L ${xj - dir * r} ${mid} A ${r} ${r} 0 0 ${dir > 0 ? 1 : 0} ${xj} ${mid + r} L ${xj} ${H}`, laneColor(j));
     }
+    if (g.stashIn) s.append(svg('line', { x1: xc, y1: 0, x2: xc, y2: mid, stroke: STASH_COLOR, 'stroke-width': 2, 'stroke-dasharray': '3 3' }));
     if (g.isMerge) s.append(svg('circle', { cx: xc, cy: mid, r: 5, fill: color }));
     else s.append(svg('circle', { cx: xc, cy: mid, r: NODE / 2 + 2, fill: color }));
     return s;

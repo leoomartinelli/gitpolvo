@@ -15,7 +15,8 @@
 
 ## Stash aparece no grafo depois de trocar de branch
 
-- Ao guardar o WIP no stash e trocar de branch, o stash fica visível no topo do grafo (e na lista da esquerda), como no GitKraken
+- Ao guardar o WIP no stash e trocar de branch, o stash fica visível no grafo (e na lista da esquerda), como no GitKraken
+- Cada stash aparece logo acima do commit de onde saiu, ligado a ele por uma linha tracejada, em vez de todos empilhados no topo
 
 ## Polvo na branch enquanto carrega
 

@@ -110,14 +110,15 @@ class Repo {
   }
 
   async stashes() {
-    const r = await this.raw(['stash', 'list', `--format=%H%x1f%gd%x1f%s`]);
+    const r = await this.raw(['stash', 'list', `--format=%H%x1f%P%x1f%gd%x1f%s`]);
     if (r.code !== 0) return [];
     return r.stdout
       .split('\n')
       .filter(Boolean)
       .map((l) => {
-        const [sha, ref, msg] = l.split(FS);
-        return { sha, ref, msg: msg || ref || '' };
+        const [sha, parents, ref, msg] = l.split(FS);
+        // o primeiro pai do commit de stash é o commit em que o WIP estava
+        return { sha, parent: (parents || '').split(' ')[0], ref, msg: msg || ref || '' };
       })
       .filter((s) => s.sha);
   }
