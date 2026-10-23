@@ -62,7 +62,7 @@
         if (!this.filters) this.filters = await this.loadFilters();
         if (!this.pinned) this.pinned = ((await polvo.settings.get()).pinnedBranches || {})[this.repo.root] || [];
         const log = r.log({ limit: this.logLimit, hidden: this.filters.hidden, solo: this.filters.solo });
-        const [head, refs, stashes, status, commits, state, submodules, worktrees, identity, hooks, template] = await Promise.all([
+        const [head, refs, stashes, status, commits, state, submodules, worktrees, identity, hooks, template, lfs, flow] = await Promise.all([
           r.head(),
           r.refs(),
           r.stashes(),
@@ -74,16 +74,18 @@
           r.identity(),
           polvo.hooks(r.root),
           polvo.commitTemplate(r.root),
+          r.lfs(),
+          r.flow(),
         ]);
         const headSha = (await r.raw(['rev-parse', 'HEAD'])).stdout.trim();
         // nada mudou desde a última leitura: só confere o diff aberto, sem redesenhar
-        const signature = JSON.stringify([head, refs, stashes, status, state, headSha, submodules, worktrees, identity, hooks, template, commits.map((c) => c.sha + c.refs.map((x) => x.name).join())]);
+        const signature = JSON.stringify([head, refs, stashes, status, state, headSha, submodules, worktrees, identity, hooks, template, lfs, flow, commits.map((c) => c.sha + c.refs.map((x) => x.name).join())]);
         if (signature === this.signature) {
           if (this.view.type === 'diff') this.reloadDiff();
           return;
         }
         this.signature = signature;
-        this.data = { head, refs, stashes, status, state, submodules, worktrees, identity, hooks, template };
+        this.data = { head, refs, stashes, status, state, submodules, worktrees, identity, hooks, template, lfs, flow };
         if (state !== 'clean' && !this.commitDraft.summary) await this.prefillSequencerMessage();
         this.commits = commits;
         this.layout = layoutGraph(commits);
@@ -950,6 +952,9 @@
       const args = ['commit', '-q', '-F', '-'];
       if (d.amend) args.push('--amend');
       if (d.noVerify) args.push('--no-verify');
+      // só força quando difere do padrão do git (commit.gpgsign)
+      const signDefault = !!this.data.identity?.signAlways;
+      if (d.sign != null && d.sign !== signDefault) args.push(d.sign ? '-S' : '--no-gpg-sign');
       const ok = await this.op('Commit', () => this.repo.run(args, msg), { undoHead: 'soft', undoLabel: `${d.amend ? 'amend' : 'commit'} "${d.summary.trim()}"` });
       if (ok) {
         this.commitDraft = { summary: '', description: '', amend: false };
@@ -1619,6 +1624,120 @@
       ]);
     }
 
+    // ---------- Git Flow ----------
+    // Mesmas chaves do git-flow (gitflow.*), então funciona junto com a extensão.
+    async flowSetup() {
+      const local = this.data.refs.local.map((b) => b.name);
+      const prod = ['main', 'master'].find((n) => local.includes(n)) || local[0] || 'main';
+      const r = await form(
+        'Configurar Git Flow',
+        [
+          { name: 'master', label: 'Branch de produção', value: prod, options: local.map((n) => ({ value: n, label: n })) },
+          { name: 'develop', label: 'Branch de desenvolvimento (criada a partir da de produção se não existir)', value: local.includes('develop') ? 'develop' : 'develop' },
+          { name: 'feature', label: 'Prefixo de feature', value: 'feature/' },
+          { name: 'release', label: 'Prefixo de release', value: 'release/' },
+          { name: 'hotfix', label: 'Prefixo de hotfix', value: 'hotfix/' },
+          { name: 'tag', label: 'Prefixo das tags de versão (opcional)', value: '', placeholder: 'v' },
+        ],
+        { ok: 'Configurar', wide: true, message: 'Features saem de desenvolvimento e voltam para ela; releases e hotfixes terminam em produção (com tag) e em desenvolvimento.' }
+      );
+      if (!r) return null;
+      const develop = r.develop.trim() || 'develop';
+      const ok = await this.op('Configurar Git Flow', async () => {
+        const set = (k, v) => this.repo.run(['config', '--local', k, v]);
+        await set('gitflow.branch.master', r.master);
+        await set('gitflow.branch.develop', develop);
+        for (const k of ['feature', 'release', 'hotfix']) await set(`gitflow.prefix.${k}`, r[k].trim());
+        await set('gitflow.prefix.versiontag', r.tag.trim());
+        if (!local.includes(develop)) await this.repo.run(['branch', develop, r.master]);
+      }, { success: 'Git Flow configurado' });
+      return ok ? this.repo.flow() : null;
+    }
+
+    async flowStart(kind) {
+      const f = this.data.flow || (await this.flowSetup());
+      if (!f) return;
+      const base = kind === 'hotfix' ? f.master : f.develop;
+      const label = { feature: 'feature', release: 'release (versão)', hotfix: 'hotfix' }[kind];
+      const name = await prompt(`Iniciar ${label}`, kind === 'feature' ? 'Nome da feature' : 'Versão', '', { ok: 'Iniciar', message: `Cria ${f.prefix[kind]}<nome> a partir de ${base} e troca para ela.` });
+      if (!name) return;
+      const branch = f.prefix[kind] + name.replace(/\s+/g, '-');
+      const how = await this.confirmSwitchWithWip(branch);
+      if (!how) return;
+      if (how === 'stash' && !(await this.stashThenSwitch(branch))) return;
+      return this.op(`Iniciar ${branch}`, () => this.repo.run(['switch', '-c', branch, base]), { success: `Agora em ${branch}` });
+    }
+
+    flowKindOf(branch) {
+      const f = this.data.flow;
+      if (!f || !branch) return null;
+      return ['feature', 'release', 'hotfix'].find((k) => f.prefix[k] && branch.startsWith(f.prefix[k])) || null;
+    }
+
+    // Feature: merge em desenvolvimento. Release/hotfix: merge em produção com tag
+    // e depois em desenvolvimento. Cada passo pode ser repetido (para retomar
+    // depois de resolver um conflito). No fim a branch é excluída.
+    async flowFinish(branch) {
+      const f = this.data.flow;
+      const kind = this.flowKindOf(branch);
+      if (!kind) return;
+      if (this.hasDirtyWorktree()) return toast('Faça commit ou stash das alterações antes de finalizar.', 'error');
+      const version = branch.slice(f.prefix[kind].length);
+      const tag = kind === 'feature' ? null : f.tag + version;
+      const steps = kind === 'feature' ? [f.develop] : [f.master, f.develop];
+      const plan = [...steps.map((b) => `merge de ${branch} em ${b}${b === f.master && tag ? ` + tag ${tag}` : ''}`), `excluir ${branch}`].join('\n• ');
+      if (!(await confirmBox(`Finalizar ${kind}`, `Vai fazer:\n• ${plan}\nNada é enviado para o servidor.`, 'Finalizar'))) return;
+      return this.op(`Finalizar ${branch}`, async () => {
+        for (const target of steps) {
+          await this.repo.run(['switch', target]);
+          const r = await this.repo.raw(['merge', '--no-ff', '--no-edit', branch]);
+          if (r.code !== 0) {
+            if (/CONFLICT/.test(r.stdout + r.stderr)) {
+              toast(`Conflito ao juntar ${branch} em ${target}. Resolva, faça o commit e use "Finalizar" de novo para continuar.`, 'error');
+              this.selected = 'WIP';
+              return;
+            }
+            throw new Error(r.stderr || r.stdout);
+          }
+          if (target === f.master && tag && (await this.repo.raw(['rev-parse', '-q', '--verify', `refs/tags/${tag}`])).code !== 0)
+            await this.repo.run(['tag', '-a', tag, '-m', `Versão ${version}`]);
+        }
+        await this.repo.run(['branch', '-d', branch]);
+        toast(`${branch} finalizada${tag ? ` (tag ${tag})` : ''}. Agora em ${steps[steps.length - 1]}.`);
+      });
+    }
+
+    flowMenu() {
+      const f = this.data.flow;
+      if (!f) return [{ label: 'Configurar Git Flow...', action: () => this.flowSetup() }];
+      const cur = this.data.head.branch;
+      const kind = this.flowKindOf(cur);
+      return [
+        { label: 'Iniciar feature...', action: () => this.flowStart('feature') },
+        { label: 'Iniciar release...', action: () => this.flowStart('release') },
+        { label: 'Iniciar hotfix...', action: () => this.flowStart('hotfix') },
+        kind && '-',
+        kind && { label: `Finalizar ${kind} ${cur.slice(f.prefix[kind].length)}`, action: () => this.flowFinish(cur) },
+        '-',
+        { label: 'Configurar Git Flow...', action: () => this.flowSetup() },
+      ];
+    }
+
+    // ---------- Git LFS ----------
+    async lfsTrack(pattern) {
+      const p = pattern || (await prompt('Guardar no LFS', 'Padrão de arquivos', '*.psd', { ok: 'Rastrear', message: 'Arquivos grandes que combinam com o padrão passam a ir para o Git LFS. A regra entra no .gitattributes (faça commit dele).' }));
+      if (!p) return;
+      return this.op('LFS track', () => this.repo.run(['lfs', 'track', p]), { success: `${p} agora vai para o LFS` });
+    }
+
+    lfsUntrack(pattern) {
+      return this.op('LFS untrack', () => this.repo.run(['lfs', 'untrack', pattern]), { success: `${pattern} saiu do LFS (os arquivos já enviados continuam lá)` });
+    }
+
+    lfsPull() {
+      return this.op('LFS pull', () => this.repo.run(['lfs', 'pull']), { success: 'Arquivos do LFS baixados' });
+    }
+
     // ---------- favoritas, ferramentas externas e modelo de commit ----------
     async togglePin(name) {
       const i = this.pinned.indexOf(name);
@@ -1961,6 +2080,7 @@
         !isCur && cur && { label: `Comparar com ${cur}`, action: () => this.compareRefs(cur, name) },
         { label: 'Comparar com...', action: () => this.pickCompare(name) },
         !isCur && { label: 'Abrir num worktree novo...', action: () => this.createWorktree(name) },
+        this.flowKindOf(name) && { label: `Finalizar ${this.flowKindOf(name)} (Git Flow)...`, action: () => this.flowFinish(name) },
         { label: this.pinned?.includes(name) ? 'Desafixar do topo' : 'Fixar no topo da lista', action: () => this.togglePin(name) },
         ...this.refFilterMenu('refs/heads/' + name, { canHide: !isCur }),
         '-',
@@ -2209,6 +2329,28 @@
           )
         );
       }
+      const spaces = h('div', {});
+      for (const w of s.workspaces || [])
+        spaces.append(
+          h(
+            'div',
+            {
+              class: 'recent-item',
+              title: w.repos.join('\n'),
+              onclick: () => this.app.openWorkspace(w),
+              oncontextmenu: (e) => {
+                e.preventDefault();
+                UI.showMenu(e.clientX, e.clientY, [
+                  { label: 'Abrir todos', action: () => this.app.openWorkspace(w) },
+                  { label: 'Substituir pelas abas abertas...', action: () => this.app.saveWorkspace() },
+                  { label: 'Excluir workspace', danger: true, action: () => this.app.deleteWorkspace(w) },
+                ]);
+              },
+            },
+            h('span', {}, '🗂'),
+            h('div', { class: 'r-text' }, h('div', { class: 'r-name' }, w.name), h('div', { class: 'r-path' }, w.repos.map((p) => p.split('/').pop()).join(' · ')))
+          )
+        );
       this.page.innerHTML = '';
       this.page.append(
         h(
@@ -2230,7 +2372,14 @@
                 h('button', { class: 'btn', onclick: () => this.app.commandInit(this) }, '✚  Iniciar novo repositório')
               )
             ),
-            h('div', {}, h('h3', {}, 'Recentes'), recent)
+            h(
+              'div',
+              {},
+              (s.workspaces || []).length ? [h('h3', {}, 'Workspaces'), spaces] : null,
+              h('h3', {}, 'Recentes'),
+              recent,
+              h('div', { class: 'dim small welcome-hint' }, 'Dica: abra vários repositórios em abas e use "Salvar abas abertas como workspace" na paleta (Ctrl+P) para abrir todos juntos depois.')
+            )
           )
         )
       );
@@ -2649,6 +2798,36 @@
       }, Math.max(5, Number(s.fetchInterval) || 5) * 1000);
     }
 
+    // ---------- workspaces ----------
+    // Grupos de repositórios abertos juntos, guardados nas configurações.
+    async saveWorkspace() {
+      const repos = this.tabs.filter((t) => t.kind === 'repo').map((t) => t.repo.root);
+      if (!repos.length) return toast('Abra os repositórios do workspace em abas primeiro.');
+      const s = (this.settings = await polvo.settings.get());
+      const list = s.workspaces || [];
+      const name = await prompt('Salvar workspace', 'Nome', '', { ok: 'Salvar', message: `${repos.length} repositório(s): ${repos.map((p) => p.split('/').pop()).join(', ')}.\nUse um nome que já existe para substituir.` });
+      if (!name) return;
+      const next = [...list.filter((w) => w.name !== name), { name, repos }].sort((a, b) => a.name.localeCompare(b.name));
+      this.settings = await polvo.settings.set({ workspaces: next });
+      toast(`Workspace "${name}" salvo`);
+      this.refreshWelcome();
+    }
+
+    async openWorkspace(ws) {
+      for (const p of ws.repos) await this.openRepo(p);
+    }
+
+    async deleteWorkspace(ws) {
+      if (!(await confirmBox('Excluir workspace', `Excluir o workspace "${ws.name}"? Os repositórios não são apagados.`, 'Excluir'))) return;
+      const s = await polvo.settings.get();
+      this.settings = await polvo.settings.set({ workspaces: (s.workspaces || []).filter((w) => w.name !== ws.name) });
+      this.refreshWelcome();
+    }
+
+    refreshWelcome() {
+      for (const t of this.tabs) if (t.kind === 'welcome') t.refresh();
+    }
+
     // ---------- perfis ----------
     async editProfiles() {
       const s = (this.settings = await polvo.settings.get());
@@ -2673,6 +2852,7 @@
         cfg(['--global', 'merge.tool']),
         cfg(['--global', 'diff.tool']),
       ]);
+      const [sigKey, sigAlways, sigFormat] = await Promise.all([cfg(['--global', 'user.signingkey']), cfg(['--global', '--type=bool', 'commit.gpgsign']), cfg(['--global', 'gpg.format'])]);
       const [lName, lEmail] = t ? await Promise.all([cfg(['--local', 'user.name']), cfg(['--local', 'user.email'])]) : ['', ''];
       const fields = [
         { section: 'Identidade no Git (todos os repositórios)' },
@@ -2704,6 +2884,10 @@
         { name: 'avatars', label: 'Mostrar fotos de perfil dos autores', type: 'checkbox', value: UI.avatars.enabled },
         { section: 'Editor externo', note: 'Comando usado em "Abrir no editor". Vazio: VS Code (code), se houver, senão o programa padrão do sistema. Use {arquivo} para escolher onde vai o caminho.' },
         { name: 'editorCmd', label: 'Comando', value: s.editorCmd || '', placeholder: 'code   ·   subl   ·   phpstorm   ·   gedit {arquivo}' },
+        { section: 'Assinatura de commits', note: 'Com uma chave, o painel de commit ganha "Assinar este commit". GPG: o ID da chave. SSH: o caminho da chave (ex.: ~/.ssh/id_ed25519.pub).' },
+        { name: 'sigFormat', label: 'Tipo de chave', value: sigFormat === 'ssh' ? 'ssh' : 'openpgp', options: [{ value: 'openpgp', label: 'GPG' }, { value: 'ssh', label: 'SSH' }] },
+        { name: 'sigKey', label: 'Chave', value: sigKey, placeholder: 'ID da chave GPG ou caminho da chave SSH' },
+        { name: 'sigAlways', label: 'Assinar todos os commits', type: 'checkbox', value: sigAlways === 'true' },
         { section: 'Ferramentas de merge e diff', note: 'Programa usado em "Abrir na ferramenta de merge/diff" (o mesmo do git mergetool/difftool). Vazio: o git escolhe.' },
         { name: 'mergeTool', label: 'Merge', value: mergeTool, placeholder: 'meld · kdiff3 · vimdiff · bc' },
         { name: 'diffTool', label: 'Diff', value: diffTool, placeholder: 'meld · kdiff3 · vimdiff · bc' },
@@ -2722,6 +2906,9 @@
       await setCfg('--global', 'user.email', r.gEmail, gEmail);
       await setCfg('--global', 'init.defaultBranch', r.defBranch, defBranch);
       await setCfg('--global', 'merge.tool', r.mergeTool, mergeTool);
+      await setCfg('--global', 'user.signingkey', r.sigKey, sigKey);
+      await setCfg('--global', 'gpg.format', r.sigFormat === 'ssh' ? 'ssh' : '', sigFormat === 'ssh' ? 'ssh' : '');
+      await setCfg('--global', 'commit.gpgsign', r.sigAlways ? 'true' : '', sigAlways === 'true' ? 'true' : '');
       await setCfg('--global', 'diff.tool', r.diffTool, diffTool);
       if (t) {
         await setCfg('--local', 'user.name', r.lName, lName);
@@ -2763,6 +2950,7 @@
         ['Reabrir aba fechada', 'tab:reopen'],
         ['Preferências...', 'app:prefs'],
         ['Perfis de identidade...', 'app:profiles'],
+        ['Salvar abas abertas como workspace...', 'app:saveWorkspace'],
         ['Alternar tema claro/escuro', 'view:theme'],
         [UI.avatars.enabled ? 'Desligar fotos de perfil' : 'Ligar fotos de perfil', 'view:avatars'],
         ['Atualizar fotos de perfil (limpar cache)', 'view:clearAvatars'],
@@ -2793,6 +2981,9 @@
           ['Novo worktree...', 'repo:worktree'],
           ['Aplicar patch...', 'repo:applyPatch'],
           ['Histórico de operações', 'repo:opLog'],
+          ['Git Flow: iniciar feature...', 'flow:feature'],
+          ['Git Flow: iniciar release...', 'flow:release'],
+          ['Git Flow: iniciar hotfix...', 'flow:hotfix'],
           ['Modelo de mensagem de commit...', 'repo:template'],
           ['Atualizar submódulos', 'repo:submodules'],
           ['Atualizar', 'repo:refresh'],
@@ -2806,6 +2997,7 @@
         for (const b of t.data.refs.local) if (!b.current) items.push({ label: `Checkout: ${b.name}`, group: 'branch', action: () => t.checkout(b.name) });
       }
       for (const p of this.settings?.recent || []) items.push({ label: `Abrir: ${p.split('/').pop()}`, group: p, action: () => this.openRepo(p) });
+      for (const w of this.settings?.workspaces || []) items.push({ label: `Abrir workspace: ${w.name}`, group: `${w.repos.length} repositório(s)`, action: () => this.openWorkspace(w) });
       return items;
     }
 
@@ -2848,6 +3040,8 @@
           return this.openPreferences();
         case 'app:profiles':
           return this.editProfiles();
+        case 'app:saveWorkspace':
+          return this.saveWorkspace();
         case 'view:avatars':
           UI.avatars.enabled = !UI.avatars.enabled;
           polvo.settings.set({ avatars: UI.avatars.enabled });
@@ -2918,6 +3112,10 @@
           return t.applyPatchFile();
         case 'repo:opLog':
           return V.opLogModal(t);
+        case 'flow:feature':
+        case 'flow:release':
+        case 'flow:hotfix':
+          return t.flowStart(name.slice(5));
         case 'repo:template':
           return t.editTemplate();
         case 'repo:submodules':

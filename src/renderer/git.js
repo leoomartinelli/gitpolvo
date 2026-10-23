@@ -167,11 +167,57 @@ class Repo {
     return parseWorktrees(r.stdout);
   }
 
-  // Nome/e-mail que o próximo commit vai usar e se vêm só deste repositório.
+  // Nome/e-mail que o próximo commit vai usar, se vêm só deste repositório e
+  // como os commits são assinados (chave e se assina sempre).
   async identity() {
     const get = async (args) => (await this.raw(['config', ...args])).stdout.trim();
-    const [name, email, localName, localEmail] = await Promise.all([get(['user.name']), get(['user.email']), get(['--local', 'user.name']), get(['--local', 'user.email'])]);
-    return { name, email, local: !!(localName || localEmail) };
+    const [name, email, localName, localEmail, signingKey, gpgSign, format] = await Promise.all([
+      get(['user.name']),
+      get(['user.email']),
+      get(['--local', 'user.name']),
+      get(['--local', 'user.email']),
+      get(['user.signingkey']),
+      get(['--type=bool', 'commit.gpgsign']),
+      get(['gpg.format']),
+    ]);
+    return { name, email, local: !!(localName || localEmail), signingKey, signAlways: gpgSign === 'true', signFormat: format || 'openpgp' };
+  }
+
+  // Git LFS: se está instalado e quais padrões o repositório guarda nele.
+  async lfs() {
+    const attrs = await window.polvo.readFile(this.root, '.gitattributes');
+    const declared = /filter=lfs/.test(attrs || '');
+    const v = await this.raw(['lfs', 'version']);
+    if (v.code !== 0) return { installed: false, declared, patterns: [] };
+    if (!declared) return { installed: true, declared, patterns: [] };
+    const t = await this.raw(['lfs', 'track']);
+    const patterns = t.stdout
+      .split('\n')
+      .map((l) => /^\s+(.+?) \((.+)\)$/.exec(l))
+      .filter(Boolean)
+      .map((m) => ({ pattern: m[1], file: m[2] }));
+    return { installed: true, declared, patterns };
+  }
+
+  // Configuração do Git Flow (compatível com o git-flow): branches e prefixos.
+  async flow() {
+    const r = await this.raw(['config', '--local', '--get-regexp', '^gitflow\\.']);
+    const cfg = {};
+    for (const l of r.stdout.split('\n').filter(Boolean)) {
+      const i = l.indexOf(' ');
+      cfg[l.slice(0, i)] = l.slice(i + 1);
+    }
+    if (!cfg['gitflow.branch.master'] || !cfg['gitflow.branch.develop']) return null;
+    return {
+      master: cfg['gitflow.branch.master'],
+      develop: cfg['gitflow.branch.develop'],
+      prefix: {
+        feature: cfg['gitflow.prefix.feature'] ?? 'feature/',
+        release: cfg['gitflow.prefix.release'] ?? 'release/',
+        hotfix: cfg['gitflow.prefix.hotfix'] ?? 'hotfix/',
+      },
+      tag: cfg['gitflow.prefix.versiontag'] ?? '',
+    };
   }
 
   async status() {

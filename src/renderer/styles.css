@@ -3298,3 +3298,11 @@ html[data-theme='light'] {
   white-space: pre-wrap;
   user-select: text;
 }
+
+.lfs-warn {
+  color: var(--warn);
+}
+
+.welcome-hint {
+  margin-top: 14px;
+}

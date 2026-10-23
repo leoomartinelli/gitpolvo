@@ -609,6 +609,27 @@
           h('span', { class: 'track' }, w.detached ? 'detached' : w.branch || '')
         )
       );
+    const lfs = tab.data.lfs || { patterns: [] };
+    const lfsItems = [
+      lfs.declared && !lfs.installed
+        ? h('div', { class: 'ref-item lfs-warn', title: 'O .gitattributes usa Git LFS, mas o git-lfs não está instalado neste computador. Sem ele, os arquivos grandes ficam só como ponteiros.' }, h('span', {}, '⚠'), h('span', { class: 'name' }, 'git-lfs não instalado'))
+        : null,
+      ...lfs.patterns.map((x) =>
+        h(
+          'div',
+          {
+            class: 'ref-item',
+            title: `${x.pattern} (em ${x.file})`,
+            oncontextmenu: (e) => {
+              e.preventDefault();
+              showMenu(e.clientX, e.clientY, [{ label: 'Parar de guardar no LFS', action: () => tab.lfsUntrack(x.pattern) }]);
+            },
+          },
+          h('span', {}, '⬢'),
+          h('span', { class: 'name mono' }, x.pattern)
+        )
+      ),
+    ].filter(Boolean);
     const add = (title, fn) =>
       h(
         'button',
@@ -635,7 +656,12 @@
         h(
           'span',
           { class: 'sec-tools' },
-          more('Mais ações', () => [{ label: 'Excluir várias branches...', action: () => tab.pickBranchesToDelete() }]),
+          more('Mais ações', () => [
+            { label: 'Excluir várias branches...', action: () => tab.pickBranchesToDelete() },
+            '-',
+            { label: 'Git Flow', disabled: true, action: () => {} },
+            ...tab.flowMenu(),
+          ]),
           add('Nova branch', () => tab.createBranch())
         )
       ),
@@ -673,6 +699,21 @@
       ),
       section(tab, 'stashes', 'Stashes', st.length, stashItems),
       section(tab, 'worktrees', 'Worktrees', wtItems.length, wtItems, add('Novo worktree', () => tab.createWorktree())),
+      lfs.declared || lfs.patterns.length
+        ? section(
+            tab,
+            'lfs',
+            'LFS',
+            lfs.patterns.length,
+            lfsItems,
+            lfs.installed
+              ? more('Mais ações', () => [
+                  { label: 'Guardar outro tipo de arquivo no LFS...', action: () => tab.lfsTrack() },
+                  { label: 'Baixar os arquivos do LFS (pull)', action: () => tab.lfsPull() },
+                ])
+              : null
+          )
+        : null,
       subs.length || (tab.data.submodules || []).length
         ? section(tab, 'submodules', 'Submódulos', subItems.length, subItems, more('Mais ações', () => [{ label: 'Baixar/atualizar todos', action: () => tab.updateSubmodules() }]))
         : null
@@ -1389,6 +1430,7 @@
                     '-',
                     { label: 'Ignorar (adicionar ao .gitignore)', action: () => tab.ignore(f.path) },
                     /\.[^./]+$/.test(f.path) && { label: `Ignorar todos os *${f.path.match(/\.[^./]+$/)[0]}`, action: () => tab.ignore('*' + f.path.match(/\.[^./]+$/)[0]) },
+                    tab.data.lfs?.installed && /\.[^./]+$/.test(f.path) && { label: `Guardar todos os *${f.path.match(/\.[^./]+$/)[0]} no LFS`, action: () => tab.lfsTrack('*' + f.path.match(/\.[^./]+$/)[0]) },
                     { label: 'Copiar caminho', action: () => navigator.clipboard.writeText(f.path) },
                     !f.untracked && { label: 'Histórico do arquivo', action: () => tab.openHistory(f.path) },
                     !f.untracked && f.status !== 'D' && { label: 'Blame', action: () => tab.openBlame(f.path) },
@@ -1538,6 +1580,14 @@
         `Pular hooks (${hooks.join(', ')})`
       );
     }
+    // assinatura: aparece quando há chave configurada; o padrão segue o commit.gpgsign
+    let signRow = null;
+    if (id.signingKey || id.signAlways) {
+      const sign = h('input', { type: 'checkbox' });
+      sign.checked = draft.sign ?? !!id.signAlways;
+      sign.addEventListener('change', () => (draft.sign = sign.checked));
+      signRow = h('label', { class: 'row dim small hooks-row', title: `Chave ${id.signFormat === 'ssh' ? 'SSH' : 'GPG'}: ${id.signingKey || '(padrão do gpg)'}` }, sign, 'Assinar este commit');
+    }
     const box = h(
       'div',
       { class: 'commit-box' },
@@ -1553,6 +1603,7 @@
       desc,
       h('label', { class: 'row dim' }, amend, 'Corrigir commit anterior (amend)'),
       hooksRow,
+      signRow,
       commitBtn
     );
     R.append(scrollBox, box);

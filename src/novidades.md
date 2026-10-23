@@ -13,7 +13,7 @@
 
 # Novidades
 
-## Imagens no diff, patches, hooks e histórico de operações
+## Imagens no diff, Git Flow, workspaces e histórico de operações
 
 - Imagens (PNG, JPG, GIF, SVG, WebP...) aparecem lado a lado no diff, antes e depois, com o tamanho de cada uma
 - Passar o mouse numa branch (no grafo ou na lista) destaca os commits da linha dela
@@ -26,6 +26,10 @@
 - Ferramenta externa de merge e de diff (meld, kdiff3...), escolhida nas Preferências
 - Exibir → Histórico de operações: o que o GitPolvo fez e os comandos do Git de cada operação, com os erros
 - As notificações agora aparecem embaixo, no centro, e não cobrem mais o botão de commit
+- Assinar commits: chave GPG ou SSH nas Preferências e "Assinar este commit" no painel de commit
+- Git Flow em "⋯" na seção Local: iniciar e finalizar feature, release (com tag) e hotfix, compatível com o git-flow
+- Git LFS: seção mostrando os tipos de arquivo guardados no LFS, com rastrear, parar de rastrear e baixar; avisa se o git-lfs não estiver instalado
+- Workspaces: salve as abas abertas como um grupo e abra todas juntas depois, pela tela inicial ou pela paleta
 
 ## Worktrees, submódulos, perfis e merge com opções
 
