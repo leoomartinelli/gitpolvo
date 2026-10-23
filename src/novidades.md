@@ -13,8 +13,11 @@
 
 # Novidades
 
-## Merge com opções, excluir várias branches, stash escolhido e remotos
+## Worktrees, submódulos, perfis e merge com opções
 
+- Worktrees: seção nova na esquerda para abrir outra branch numa pasta separada, cada uma na sua aba ("+" ou "Abrir num worktree novo..." no menu da branch)
+- Submódulos: seção nova na esquerda mostrando quais estão em dia, desatualizados ou ainda não baixados, com baixar/atualizar e abrir em nova aba
+- O painel de commit mostra com qual nome e e-mail o commit vai sair; clique para trocar de perfil só neste repositório ou gerenciar os perfis (ex.: trabalho e pessoal)
 - "Merge com opções..." no menu da branch: sempre criar commit de merge (--no-ff), só avançar (--ff-only) ou squash, que deixa as mudanças preparadas com a mensagem sugerida
 - Excluir local e remota de uma vez, e "⋯ → Excluir várias branches" na seção Local, mostrando quais já estão mescladas
 - Tags: "Excluir tag no remoto" e "⋯ → Enviar todas as tags"

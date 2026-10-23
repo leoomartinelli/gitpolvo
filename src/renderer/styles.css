@@ -3066,3 +3066,74 @@ html[data-theme='light'] {
   gap: 4px 8px;
   min-width: 0;
 }
+
+/* ---------- submódulos, worktrees e identidade ---------- */
+.sub-state {
+  width: 12px;
+  text-align: center;
+  color: var(--accent);
+}
+
+.sub-uninit .sub-state,
+.sub-uninit .name {
+  color: var(--text-dim);
+}
+
+.sub-changed .sub-state {
+  color: var(--warn);
+}
+
+.sub-conflict .sub-state {
+  color: var(--danger);
+}
+
+.wt-mark {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.commit-as {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0 0 2px;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.commit-as strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.commit-as .solo-mark {
+  margin-left: 6px;
+}
+
+.commit-as:hover strong {
+  text-decoration: underline;
+}
+
+.profile-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.profile-row {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr 1.6fr auto;
+  gap: 6px;
+  align-items: center;
+}

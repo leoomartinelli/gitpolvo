@@ -60,16 +60,26 @@
         const r = this.repo;
         if (!this.filters) this.filters = await this.loadFilters();
         const log = r.log({ limit: this.logLimit, hidden: this.filters.hidden, solo: this.filters.solo });
-        const [head, refs, stashes, status, commits, state] = await Promise.all([r.head(), r.refs(), r.stashes(), r.status(), log, r.state()]);
+        const [head, refs, stashes, status, commits, state, submodules, worktrees, identity] = await Promise.all([
+          r.head(),
+          r.refs(),
+          r.stashes(),
+          r.status(),
+          log,
+          r.state(),
+          r.submodules(),
+          r.worktrees(),
+          r.identity(),
+        ]);
         const headSha = (await r.raw(['rev-parse', 'HEAD'])).stdout.trim();
         // nada mudou desde a última leitura: só confere o diff aberto, sem redesenhar
-        const signature = JSON.stringify([head, refs, stashes, status, state, headSha, commits.map((c) => c.sha + c.refs.map((x) => x.name).join())]);
+        const signature = JSON.stringify([head, refs, stashes, status, state, headSha, submodules, worktrees, identity, commits.map((c) => c.sha + c.refs.map((x) => x.name).join())]);
         if (signature === this.signature) {
           if (this.view.type === 'diff') this.reloadDiff();
           return;
         }
         this.signature = signature;
-        this.data = { head, refs, stashes, status, state };
+        this.data = { head, refs, stashes, status, state, submodules, worktrees, identity };
         if (state !== 'clean' && !this.commitDraft.summary) await this.prefillSequencerMessage();
         this.commits = commits;
         this.layout = layoutGraph(commits);
@@ -1430,6 +1440,121 @@
       return this.op('Push da tag', () => this.repo.run(['push', remote, `refs/tags/${name}`]), { success: `Tag ${name} enviada para ${remote}` });
     }
 
+    // ---------- submódulos ----------
+    submoduleMenu(m) {
+      return [
+        m.state !== 'uninit' && { label: 'Abrir em nova aba', action: () => this.openSubmodule(m) },
+        { label: m.state === 'uninit' ? 'Baixar (update --init)' : 'Atualizar para o commit registrado', action: () => this.updateSubmodules([m.path]) },
+        { label: 'Sincronizar URL do .gitmodules', action: () => this.op('Sincronizar submódulo', () => this.repo.run(['submodule', 'sync', '--', m.path]), { success: `URL de ${m.path} sincronizada` }) },
+        '-',
+        m.state !== 'uninit' && { label: 'Abrir pasta', action: () => polvo.reveal(this.repo.root + '/' + m.path) },
+        m.url && { label: 'Copiar URL', action: () => this.copy(m.url) },
+      ];
+    }
+
+    openSubmodule(m) {
+      if (m.state === 'uninit') return toast(`${m.path} ainda não foi baixado. Use "Baixar" no menu dele.`);
+      return this.app.openRepo(this.repo.root + '/' + m.path);
+    }
+
+    // paths omitido = todos, inclusive os aninhados
+    updateSubmodules(paths) {
+      const label = paths ? `Atualizar ${paths.join(', ')}` : 'Atualizar submódulos';
+      return this.op(label, () => this.repo.run(['submodule', 'update', '--init', '--recursive', ...(paths ? ['--', ...paths] : [])]), { success: 'Submódulos atualizados' });
+    }
+
+    // ---------- worktrees ----------
+    // Outra pasta com outra branch do mesmo repositório, aberta numa aba própria.
+    async createWorktree(branch) {
+      const local = this.data.refs.local.map((b) => b.name);
+      const used = new Set((this.data.worktrees || []).map((w) => w.branch).filter(Boolean));
+      const free = local.filter((n) => !used.has(n));
+      const parent = this.repo.root.replace(/\/[^/]+$/, '');
+      const suggest = (b) => `${parent}/${this.repo.name}-${(b || 'nova').replace(/[^\w.-]+/g, '-')}`;
+      const r = await form(
+        'Novo worktree',
+        [
+          {
+            name: 'branch',
+            label: 'Branch',
+            value: branch && free.includes(branch) ? branch : '__new__',
+            options: [{ value: '__new__', label: 'Criar uma branch nova...' }, ...free.map((n) => ({ value: n, label: n }))],
+          },
+          { name: 'newName', label: 'Nome da branch nova (se for criar)', placeholder: 'feature/minha-branch' },
+          { name: 'path', label: 'Pasta do worktree', value: suggest(branch), browse: true },
+          { name: 'open', label: 'Abrir em nova aba depois de criar', type: 'checkbox', value: true },
+        ],
+        { ok: 'Criar', message: `Uma pasta separada com outra branch de ${this.repo.name}, para trabalhar nas duas ao mesmo tempo. Branches já abertas em outro worktree não aparecem.` }
+      );
+      if (!r) return;
+      const isNew = r.branch === '__new__';
+      const name = isNew ? r.newName.trim().replace(/\s+/g, '-') : r.branch;
+      if (!name) return toast('Escolha a branch ou digite o nome da nova.', 'error');
+      const dir = r.path.trim() || suggest(name);
+      const ok = await this.op('Criar worktree', () => this.repo.run(['worktree', 'add', ...(isNew ? ['-b', name, dir] : [dir, name])]), { success: `Worktree de ${name} criado em ${dir}` });
+      if (ok && r.open) this.app.openRepo(dir);
+    }
+
+    async removeWorktree(w) {
+      if (!(await confirmBox('Remover worktree', `Remover a pasta "${w.path}"?\nA branch ${w.branch || ''} continua existindo; só a pasta sai.`, 'Remover'))) return;
+      // a aba aberta nessa pasta deixaria de funcionar
+      const closeTabs = () => this.app.tabs.filter((t) => t.kind === 'repo' && t.repo.root === w.path).forEach((t) => this.app.closeTab(t));
+      const r = await this.repo.raw(['worktree', 'remove', w.path]);
+      if (r.code === 0) {
+        closeTabs();
+        toast('Worktree removido');
+        return this.refresh();
+      }
+      if (/modified or untracked|contains modified/i.test(r.stderr) && (await confirmBox('Worktree com alterações', `"${w.path}" tem alterações sem commit. Remover mesmo assim? Elas serão perdidas.`, 'Remover e perder'))) {
+        const ok = await this.op('Remover worktree', () => this.repo.run(['worktree', 'remove', '--force', w.path]));
+        if (ok) closeTabs();
+        return ok;
+      }
+      if (r.code !== 0 && !/modified or untracked|contains modified/i.test(r.stderr)) toast(`Remover worktree falhou:\n${r.stderr.trim()}`, 'error');
+    }
+
+    worktreeMenu(w, isMain) {
+      const here = w.path === this.repo.root;
+      return [
+        !here && { label: 'Abrir em nova aba', action: () => this.app.openRepo(w.path) },
+        { label: 'Abrir pasta', action: () => polvo.reveal(w.path) },
+        { label: 'Copiar caminho', action: () => this.copy(w.path) },
+        w.prunable && { label: 'Limpar worktrees que sumiram (prune)', action: () => this.op('Limpar worktrees', () => this.repo.run(['worktree', 'prune'])) },
+        !isMain && !here && '-',
+        !isMain && !here && { label: 'Remover worktree...', danger: true, action: () => this.removeWorktree(w) },
+      ];
+    }
+
+    // ---------- identidade e perfis ----------
+    // Aplica um perfil só neste repositório (git config --local); null volta para a identidade geral.
+    async useProfile(p) {
+      const set = (k, v) => (v ? this.repo.run(['config', '--local', k, v]) : this.repo.raw(['config', '--local', '--unset', k]));
+      const before = this.data.identity;
+      const prev = { name: (await this.repo.raw(['config', '--local', 'user.name'])).stdout.trim(), email: (await this.repo.raw(['config', '--local', 'user.email'])).stdout.trim() };
+      const apply = async (x) => {
+        await set('user.name', x ? x.name : '');
+        await set('user.email', x ? x.email : '');
+      };
+      const ok = await this.op('Trocar identidade', () => apply(p), { success: p ? `Commits deste repositório como ${p.name} <${p.email}>` : 'Usando a identidade geral do Git' });
+      if (ok) this.record({ label: `identidade (${before.name})`, undo: () => apply(prev.name || prev.email ? prev : null), redo: () => apply(p) });
+    }
+
+    async identityMenu(x, y) {
+      const s = (this.app.settings = await polvo.settings.get());
+      const profiles = s.profiles || [];
+      const id = this.data.identity || {};
+      const isCur = (p) => p.name === id.name && p.email === id.email;
+      UI.showMenu(x, y, [
+        { label: 'Commitar neste repositório como:', disabled: true, action: () => {} },
+        ...profiles.map((p) => ({ label: `${isCur(p) ? '✓ ' : '\u2003'}${p.label || p.name} — ${p.email}`, action: () => this.useProfile(p) })),
+        !profiles.length && { label: '\u2003(nenhum perfil salvo)', disabled: true, action: () => {} },
+        id.local && { label: 'Usar a identidade geral do Git', action: () => this.useProfile(null) },
+        '-',
+        { label: 'Gerenciar perfis...', action: () => this.app.editProfiles() },
+        { label: 'Preferências...', action: () => this.app.openPreferences() },
+      ]);
+    }
+
     // ---------- remotos ----------
     async pickRemote() {
       const remotes = await this.repo.remoteNames();
@@ -1725,6 +1850,7 @@
         '-',
         !isCur && cur && { label: `Comparar com ${cur}`, action: () => this.compareRefs(cur, name) },
         { label: 'Comparar com...', action: () => this.pickCompare(name) },
+        !isCur && { label: 'Abrir num worktree novo...', action: () => this.createWorktree(name) },
         ...this.refFilterMenu('refs/heads/' + name, { canHide: !isCur }),
         '-',
         { label: 'Copiar nome', action: () => this.copy(name) },
@@ -2390,6 +2516,17 @@
       }, Math.max(5, Number(s.fetchInterval) || 5) * 1000);
     }
 
+    // ---------- perfis ----------
+    async editProfiles() {
+      const s = (this.settings = await polvo.settings.get());
+      const t = this.repoTab();
+      const seed = s.profiles && s.profiles.length ? s.profiles : t?.data.identity?.name ? [{ label: 'Principal', name: t.data.identity.name, email: t.data.identity.email }] : [];
+      const profiles = await V.profilesEditor(seed);
+      if (!profiles) return;
+      this.settings = await polvo.settings.set({ profiles });
+      toast('Perfis salvos');
+    }
+
     // ---------- preferências ----------
     async openPreferences() {
       const t = this.repoTab();
@@ -2481,6 +2618,7 @@
         ['Nova aba', 'tab:new'],
         ['Reabrir aba fechada', 'tab:reopen'],
         ['Preferências...', 'app:prefs'],
+        ['Perfis de identidade...', 'app:profiles'],
         ['Alternar tema claro/escuro', 'view:theme'],
         [UI.avatars.enabled ? 'Desligar fotos de perfil' : 'Ligar fotos de perfil', 'view:avatars'],
         ['Atualizar fotos de perfil (limpar cache)', 'view:clearAvatars'],
@@ -2508,6 +2646,8 @@
           ['Adicionar remoto', 'repo:addRemote'],
           ['Abrir terminal', 'repo:terminal'],
           ['Abrir pasta', 'repo:reveal'],
+          ['Novo worktree...', 'repo:worktree'],
+          ['Atualizar submódulos', 'repo:submodules'],
           ['Atualizar', 'repo:refresh'],
           ['Mostrar/ocultar painel esquerdo', 'view:toggleLeft'],
           ['Mostrar/ocultar painel de detalhes', 'view:toggleRight'],
@@ -2559,6 +2699,8 @@
           return this.toggleTheme();
         case 'app:prefs':
           return this.openPreferences();
+        case 'app:profiles':
+          return this.editProfiles();
         case 'view:avatars':
           UI.avatars.enabled = !UI.avatars.enabled;
           polvo.settings.set({ avatars: UI.avatars.enabled });
@@ -2623,6 +2765,10 @@
           return polvo.terminal(t.repo.root);
         case 'repo:reveal':
           return polvo.reveal(t.repo.root);
+        case 'repo:worktree':
+          return t.createWorktree();
+        case 'repo:submodules':
+          return t.updateSubmodules();
         case 'repo:refresh':
           return t.refresh();
       }

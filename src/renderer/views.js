@@ -402,6 +402,8 @@
     if (!refs) return L.append(filter);
 
     const local = refs.local.filter((b) => match(b.name));
+    const wts = tab.data.worktrees || [];
+    const elsewhere = new Map(wts.filter((w) => w.branch && w.path !== tab.repo.root).map((w) => [w.branch, w.path]));
     const localItems = local.map((b) =>
       h(
         'div',
@@ -426,6 +428,7 @@
           b.behind ? `↓${b.behind} ` : '',
           b.ahead ? `↑${b.ahead}` : ''
         ),
+        elsewhere.has(b.name) ? h('span', { class: 'wt-mark', title: `Aberta no worktree ${elsewhere.get(b.name)}` }, 'worktree') : null,
         soloMark(tab, 'refs/heads/' + b.name),
         b.current ? h('span', { class: 'eye-slot' }) : eyeButton(tab, 'refs/heads/' + b.name)
       )
@@ -533,6 +536,44 @@
         },
         '⋯'
       );
+    const SUB_STATE = { ok: ['●', 'Em dia com o commit registrado'], uninit: ['○', 'Ainda não baixado'], changed: ['◐', 'No diretório há outro commit que o registrado'], conflict: ['!', 'Em conflito'] };
+    const subs = (tab.data.submodules || []).filter((m) => match(m.path));
+    const subItems = subs.map((m) =>
+      h(
+        'div',
+        {
+          class: 'ref-item sub-' + m.state,
+          title: `${m.path}\n${SUB_STATE[m.state][1]}${m.describe ? ` (${m.describe})` : ''}${m.url ? `\n${m.url}` : ''}\nDuplo clique: abrir em nova aba`,
+          ondblclick: () => tab.openSubmodule(m),
+          oncontextmenu: (e) => {
+            e.preventDefault();
+            showMenu(e.clientX, e.clientY, tab.submoduleMenu(m));
+          },
+        },
+        h('span', { class: 'sub-state' }, SUB_STATE[m.state][0]),
+        h('span', { class: 'name' }, m.path),
+        m.state !== 'ok' ? h('span', { class: 'track' }, m.state === 'uninit' ? 'não baixado' : m.state === 'changed' ? 'outro commit' : 'conflito') : null
+      )
+    );
+    const wtItems = wts
+      .filter((w) => match(w.path) || match(w.branch || ''))
+      .map((w, i) =>
+        h(
+          'div',
+          {
+            class: 'ref-item' + (w.path === tab.repo.root ? ' current' : '') + (w.prunable ? ' ref-hidden' : ''),
+            title: `${w.path}${w.locked ? '\n(bloqueado)' : ''}${w.prunable ? '\nA pasta não existe mais' : ''}${w.path === tab.repo.root ? '\nEste é o worktree aberto nesta aba' : '\nDuplo clique: abrir em nova aba'}`,
+            ondblclick: () => w.path !== tab.repo.root && !w.prunable && tab.app.openRepo(w.path),
+            oncontextmenu: (e) => {
+              e.preventDefault();
+              showMenu(e.clientX, e.clientY, tab.worktreeMenu(w, i === 0));
+            },
+          },
+          h('span', {}, w.path === tab.repo.root ? '✔' : '⧉'),
+          h('span', { class: 'name' }, w.path.split('/').pop()),
+          h('span', { class: 'track' }, w.detached ? 'detached' : w.branch || '')
+        )
+      );
     const add = (title, fn) =>
       h(
         'button',
@@ -595,7 +636,11 @@
         tagItems,
         h('span', { class: 'sec-tools' }, more('Mais ações', () => [{ label: 'Enviar todas as tags para o remoto', action: () => tab.pushAllTags() }]), add('Nova tag no HEAD', () => tab.createTag('HEAD')))
       ),
-      section(tab, 'stashes', 'Stashes', st.length, stashItems)
+      section(tab, 'stashes', 'Stashes', st.length, stashItems),
+      section(tab, 'worktrees', 'Worktrees', wtItems.length, wtItems, add('Novo worktree', () => tab.createWorktree())),
+      subs.length || (tab.data.submodules || []).length
+        ? section(tab, 'submodules', 'Submódulos', subItems.length, subItems, more('Mais ações', () => [{ label: 'Baixar/atualizar todos', action: () => tab.updateSubmodules() }]))
+        : null
     );
     L.append(filter, sections);
     sections.scrollTop = prevScroll;
@@ -1420,10 +1465,25 @@
     desc.addEventListener('keydown', ctrlEnter);
     updateBtn();
     tab.els.commitSummary = summary;
+    const id = tab.data.identity || {};
+    const who = h(
+      'button',
+      {
+        class: 'commit-as',
+        title: id.local ? 'Identidade definida só para este repositório. Clique para trocar.' : 'Identidade geral do Git. Clique para usar outra neste repositório.',
+        onclick: (e) => tab.identityMenu(e.clientX, e.clientY),
+      },
+      'como ',
+      h('strong', {}, id.name || '(sem nome)'),
+      ` <${id.email || 'sem e-mail'}>`,
+      id.local ? h('span', { class: 'solo-mark' }, 'só aqui') : null,
+      ' ▾'
+    );
     const box = h(
       'div',
       { class: 'commit-box' },
       h('div', { class: 'row' }, h('strong', { class: 'grow' }, 'Mensagem do commit'), counter),
+      who,
       summary,
       desc,
       h('label', { class: 'row dim' }, amend, 'Corrigir commit anterior (amend)'),
@@ -1986,6 +2046,59 @@
     body.scrollTop = prevDiff;
   }
 
+  // Lista editável de perfis { label, name, email }; devolve a lista ou null.
+  function profilesEditor(initial) {
+    const list = initial.map((p) => ({ ...p }));
+    return new Promise((resolve) => {
+      openModal(
+        (close) => {
+          const rows = h('div', { class: 'profile-rows' });
+          const err = h('div', { class: 'rebase-error' });
+          const render = () => {
+            rows.innerHTML = '';
+            if (!list.length) rows.append(h('div', { class: 'dim' }, 'Nenhum perfil ainda. Adicione um para trocar de identidade com um clique.'));
+            list.forEach((p, i) => {
+              const field = (key, placeholder) => {
+                const el = h('input', { placeholder, spellcheck: 'false' });
+                el.value = p[key] || '';
+                el.addEventListener('input', () => (p[key] = el.value));
+                return el;
+              };
+              rows.append(
+                h(
+                  'div',
+                  { class: 'profile-row' },
+                  field('label', 'Apelido (ex.: Trabalho)'),
+                  field('name', 'Nome'),
+                  field('email', 'E-mail'),
+                  h('button', { class: 'icon-btn', title: 'Remover', onclick: () => (list.splice(i, 1), render()) }, '✕')
+                )
+              );
+            });
+          };
+          render();
+          const save = () => {
+            const clean = list.map((p) => ({ label: (p.label || '').trim(), name: (p.name || '').trim(), email: (p.email || '').trim() })).filter((p) => p.name || p.email);
+            const bad = clean.find((p) => !p.name || !/^[^\s@]+@[^\s@]+$/.test(p.email));
+            if (bad) return (err.textContent = `Confira o perfil "${bad.label || bad.name || bad.email}": precisa de nome e de um e-mail válido.`);
+            close(clean);
+          };
+          return h(
+            'div',
+            { class: 'modal wide' },
+            h('h2', {}, 'Perfis de identidade'),
+            h('div', { class: 'msg dim' }, 'Nome e e-mail que vão nos commits. Escolha o perfil de cada repositório em "como ..." no painel de commit.'),
+            rows,
+            h('div', {}, h('button', { class: 'btn small', onclick: () => (list.push({ label: '', name: '', email: '' }), render()) }, '+ Adicionar perfil')),
+            err,
+            h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => close(null) }, 'Cancelar'), h('button', { class: 'btn primary', onclick: save }, 'Salvar'))
+          );
+        },
+        { onClose: resolve }
+      );
+    });
+  }
+
   // Janela simples com um campo de mensagem (usada no squash).
   function messageEditor(title, text, { ok = 'OK', message } = {}) {
     return new Promise((resolve) => {
@@ -2343,5 +2456,5 @@
     });
   }
 
-  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, renderHistory, renderBlame, renderEditor, rebaseEditor, messageEditor, setDiffPrefs, diffPrefs, ROW_H };
+  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, renderHistory, renderBlame, renderEditor, rebaseEditor, messageEditor, profilesEditor, setDiffPrefs, diffPrefs, ROW_H };
 })();

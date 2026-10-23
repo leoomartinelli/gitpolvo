@@ -139,6 +139,36 @@ class Repo {
       .filter((s) => s.sha);
   }
 
+  // Submódulos declarados no .gitmodules. state: 'ok', 'uninit' (ainda não
+  // baixado), 'changed' (no diretório há outro commit que o registrado) ou 'conflict'.
+  async submodules() {
+    const r = await this.raw(['submodule', 'status']);
+    if (r.code !== 0 || !r.stdout.trim()) return [];
+    const urls = {};
+    const cfg = await this.raw(['config', '-f', '.gitmodules', '--get-regexp', '^submodule\\..*\\.(path|url)$']);
+    const byName = {};
+    for (const line of cfg.stdout.split('\n').filter(Boolean)) {
+      const m = /^submodule\.(.+)\.(path|url) (.*)$/.exec(line);
+      if (m) (byName[m[1]] ||= {})[m[2]] = m[3];
+    }
+    for (const v of Object.values(byName)) if (v.path) urls[v.path] = v.url;
+    return parseSubmoduleStatus(r.stdout).map((x) => ({ ...x, url: urls[x.path] || '' }));
+  }
+
+  // O primeiro da lista é o diretório principal do repositório.
+  async worktrees() {
+    const r = await this.raw(['worktree', 'list', '--porcelain']);
+    if (r.code !== 0) return [];
+    return parseWorktrees(r.stdout);
+  }
+
+  // Nome/e-mail que o próximo commit vai usar e se vêm só deste repositório.
+  async identity() {
+    const get = async (args) => (await this.raw(['config', ...args])).stdout.trim();
+    const [name, email, localName, localEmail] = await Promise.all([get(['user.name']), get(['user.email']), get(['--local', 'user.name']), get(['--local', 'user.email'])]);
+    return { name, email, local: !!(localName || localEmail) };
+  }
+
   async status() {
     const out = await this.run(['status', '--porcelain=v1', '-z', '--untracked-files=all']);
     const parts = out.split('\0');
@@ -301,6 +331,34 @@ function parseBlame(text) {
     else if (key === 'summary') c.summary = val;
   }
   return { commits, lines };
+}
+
+function parseSubmoduleStatus(text) {
+  const state = { ' ': 'ok', '-': 'uninit', '+': 'changed', U: 'conflict' };
+  return text
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => {
+      const m = /^([ +\-U])([0-9a-f]+) (\S+)(?: \((.*)\))?$/.exec(l);
+      return m && { state: state[m[1]], sha: m[2], path: m[3], describe: m[4] || '' };
+    })
+    .filter(Boolean);
+}
+
+function parseWorktrees(text) {
+  const out = [];
+  let cur = null;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('worktree ')) out.push((cur = { path: line.slice(9), branch: null, sha: '', detached: false, locked: false, prunable: false, bare: false }));
+    else if (!cur) continue;
+    else if (line.startsWith('HEAD ')) cur.sha = line.slice(5);
+    else if (line.startsWith('branch ')) cur.branch = line.slice(7).replace(/^refs\/heads\//, '');
+    else if (line === 'detached') cur.detached = true;
+    else if (line === 'bare') cur.bare = true;
+    else if (line.startsWith('locked')) cur.locked = true;
+    else if (line.startsWith('prunable')) cur.prunable = true;
+  }
+  return out;
 }
 
 // Página web do repositório a partir da URL do remoto (https, ssh ou scp),
@@ -515,4 +573,4 @@ function branchOwners(commits, rows) {
   return owners;
 }
 
-window.GitLayer = { Repo, GitError, parseDiff, parseBlame, remoteWeb, hunkPatch, linesPatch, layoutGraph, branchOwners, LOG_PAGE };
+window.GitLayer = { Repo, GitError, parseDiff, parseBlame, parseSubmoduleStatus, parseWorktrees, remoteWeb, hunkPatch, linesPatch, layoutGraph, branchOwners, LOG_PAGE };

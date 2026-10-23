@@ -40,3 +40,19 @@ test('parseBlame separa linhas por commit e marca o que não foi commitado', () 
   assert.equal(lines[1].sha, lines[0].sha);
   assert.equal(commits[lines[2].sha].uncommitted, true);
 });
+
+test('parseSubmoduleStatus lê o estado de cada submódulo', () => {
+  const { parseSubmoduleStatus } = sandbox.window.GitLayer;
+  const list = parseSubmoduleStatus(
+    ' 1111111111111111111111111111111111111111 libs/a (v1.0)\n-2222222222222222222222222222222222222222 libs/b\n+3333333333333333333333333333333333333333 libs/c (heads/main)\n'
+  );
+  assert.equal(list.map((x) => `${x.path}:${x.state}:${x.describe}`).join(' '), 'libs/a:ok:v1.0 libs/b:uninit: libs/c:changed:heads/main');
+});
+
+test('parseWorktrees separa diretório principal, branch e detached', () => {
+  const { parseWorktrees } = sandbox.window.GitLayer;
+  const list = parseWorktrees(
+    'worktree /repo\nHEAD aaa\nbranch refs/heads/main\n\nworktree /repo-feat\nHEAD bbb\nbranch refs/heads/feat/x\nlocked\n\nworktree /tmp/solto\nHEAD ccc\ndetached\nprunable gitdir file points to non-existent location\n'
+  );
+  assert.equal(list.map((w) => `${w.path}|${w.branch}|${w.detached}|${w.locked}|${w.prunable}`).join(' '), '/repo|main|false|false|false /repo-feat|feat/x|false|true|false /tmp/solto|null|true|false|true');
+});
