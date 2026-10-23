@@ -212,15 +212,45 @@ class Repo {
   }
 
   // kind: 'unstaged' | 'staged' | 'untracked' | 'commit'
-  async diff(kind, file, sha, parents) {
+  // from: caminho antigo, quando o arquivo foi renomeado no commit
+  async diff(kind, file, sha, parents, from) {
+    const paths = from && from !== file ? [from, file] : [file];
     let r;
     if (kind === 'unstaged') r = await this.raw(['diff', '--no-color', '--no-ext-diff', '--', file]);
     else if (kind === 'staged') r = await this.raw(['diff', '--cached', '--no-color', '--no-ext-diff', '--', file]);
     else if (kind === 'untracked') r = await this.raw(['diff', '--no-color', '--no-index', '--', '/dev/null', file]);
     else if (parents && parents.length)
-      r = await this.raw(['diff', '--no-color', '--no-ext-diff', '-M', parents[0], sha, '--', file]);
+      r = await this.raw(['diff', '--no-color', '--no-ext-diff', '-M', parents[0], sha, '--', ...paths]);
     else r = await this.raw(['show', '--no-color', '--format=', sha, '--', file]);
     return parseDiff(r.stdout);
+  }
+
+  // Commits que mexeram no arquivo, seguindo renomeações; `path` é o nome do
+  // arquivo naquele commit e `from` o nome anterior quando ele foi renomeado.
+  async fileHistory(file) {
+    const fmt = RS + ['%H', '%P', '%an', '%ae', '%at', '%s'].join(FS);
+    const r = await this.raw(['log', '--follow', '-M', '--name-status', `--format=${fmt}`, '--', file]);
+    if (r.code !== 0) throw new GitError(['log'], r);
+    return r.stdout
+      .split(RS)
+      .filter((x) => x.trim())
+      .map((rec) => {
+        const [head, ...rest] = rec.split('\n');
+        const [sha, parents, author, email, at, subject] = head.split(FS);
+        const st = rest.find((l) => /^[A-Z]/.test(l)) || '';
+        const cols = st.split('\t');
+        return {
+          sha,
+          parents: parents ? parents.split(' ') : [],
+          author,
+          email,
+          date: new Date(Number(at) * 1000),
+          subject,
+          status: st[0] || 'M',
+          path: cols[cols.length - 1] || file,
+          from: cols.length > 2 ? cols[1] : null,
+        };
+      });
   }
 
   async applyPatch(patch, { cached = true, reverse = false } = {}) {
@@ -312,6 +342,46 @@ function hunkPatch(file, hunk) {
   return [...file.header, hunk.header, ...hunk.lines.map((l) => l.raw), ''].join('\n');
 }
 
+// Patch só com as linhas escolhidas (`picked(hunk, line)`), para stage/unstage/
+// descarte por linha. Aplicado para frente (stage), uma remoção não escolhida
+// vira contexto e uma adição não escolhida some; ao contrário (unstage e
+// descarte, com -R) é o inverso. Assim o lado que o git confere no índice ou no
+// diretório continua idêntico ao arquivo de verdade.
+function linesPatch(file, picked, { reverse = false } = {}) {
+  const out = [...file.header];
+  let any = false;
+  for (const hk of file.hunks) {
+    const lines = [];
+    let oldN = 0;
+    let newN = 0;
+    let changed = false;
+    let dropped = false;
+    for (const l of hk.lines) {
+      if (l.type === 'meta') {
+        if (!dropped) lines.push(l.raw);
+        continue;
+      }
+      dropped = false;
+      const keep = l.type === 'ctx' || picked(hk, l);
+      if (l.type === 'ctx' || keep) {
+        lines.push(l.raw);
+        if (l.type !== 'add') oldN++;
+        if (l.type !== 'del') newN++;
+        if (l.type !== 'ctx') changed = true;
+      } else if ((l.type === 'del') !== reverse) {
+        // fica como estava: vira contexto
+        lines.push(' ' + l.text);
+        oldN++;
+        newN++;
+      } else dropped = true;
+    }
+    if (!changed) continue;
+    any = true;
+    out.push(`@@ -${hk.oldStart},${oldN} +${hk.newStart},${newN} @@${hk.context}`, ...lines);
+  }
+  return any ? out.join('\n') + '\n' : null;
+}
+
 // Atribui colunas (lanes) a cada commit e produz as arestas desenhadas por linha.
 // `lanes[i]` guarda o SHA esperado naquela coluna; colunas liberadas viram null e
 // são reaproveitadas, mantendo as linhas estáveis verticalmente.
@@ -389,4 +459,4 @@ function branchOwners(commits, rows) {
   return owners;
 }
 
-window.GitLayer = { Repo, GitError, parseDiff, hunkPatch, layoutGraph, branchOwners, LOG_PAGE };
+window.GitLayer = { Repo, GitError, parseDiff, hunkPatch, linesPatch, layoutGraph, branchOwners, LOG_PAGE };

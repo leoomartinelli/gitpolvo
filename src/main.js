@@ -524,8 +524,9 @@ function buildMenu() {
     {
       label: '&Editar',
       submenu: [
-        { role: 'undo', label: 'Desfazer' },
-        { role: 'redo', label: 'Refazer' },
+        // dentro de um campo de texto desfaz a digitação; fora, a última ação no repositório
+        { label: 'Desfazer', accelerator: 'CmdOrCtrl+Z', click: cmd('edit:undo') },
+        { label: 'Refazer', accelerator: 'CmdOrCtrl+Shift+Z', click: cmd('edit:redo') },
         { type: 'separator' },
         { role: 'cut', label: 'Recortar' },
         { role: 'copy', label: 'Copiar' },

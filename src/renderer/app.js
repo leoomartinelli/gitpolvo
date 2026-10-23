@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const { Repo, hunkPatch, layoutGraph, branchOwners, LOG_PAGE } = window.GitLayer;
+  const { Repo, hunkPatch, linesPatch, layoutGraph, branchOwners, LOG_PAGE } = window.GitLayer;
   const { h, toast, form, prompt, confirmBox, choices, palette, openModal } = window.UI;
   const V = window.Views;
   const polvo = window.polvo;
@@ -26,6 +26,8 @@
       this.compare = null; // { a, b, labelA, labelB, files, counts } da comparação aberta
       this.logLimit = LOG_PAGE;
       this.filters = null; // branches escondidas/solo no grafo, lidas das configurações
+      this.undoStack = []; // ações que o botão Desfazer sabe reverter (só nesta sessão)
+      this.redoStack = [];
       this.view = { type: 'graph' };
       this.collapsed = {};
       this.commitDraft = { summary: '', description: '', amend: false };
@@ -268,6 +270,7 @@
 
     renderCenter() {
       if (this.view.type === 'diff') V.renderDiff(this);
+      else if (this.view.type === 'history') V.renderHistory(this);
       else if (this.view.type === 'conflict') V.renderConflict(this);
       else V.renderGraph(this);
     }
@@ -279,11 +282,15 @@
 
     // Executa uma operação Git com indicador de progresso, mensagem de erro e
     // atualização da tela ao final.
-    async op(label, fn, { success, quiet } = {}) {
+    // undoHead: 'soft' | 'keep' registra no Desfazer a volta da branch para onde
+    // estava, se a operação moveu o HEAD e terminou sem conflito.
+    async op(label, fn, { success, quiet, undoHead, undoLabel } = {}) {
       this.setBusy(label + '...');
       try {
+        const before = undoHead ? await this.headState() : null;
         await fn();
         if (success) toast(success);
+        if (before) await this.recordHeadMove(undoLabel || label, before, undoHead);
         return true;
       } catch (e) {
         if (!quiet) toast(`${label} falhou:\n${e.message}`, 'error');
@@ -292,6 +299,102 @@
         this.busy = null;
         await this.refresh();
       }
+    }
+
+    // ---------- desfazer / refazer ----------
+    // Cada entrada sabe se desfazer e se refazer; antes de agir ela confere se o
+    // repositório ainda está como ficou depois da ação, senão recusa.
+    record(entry) {
+      this.undoStack.push(entry);
+      if (this.undoStack.length > 50) this.undoStack.shift();
+      this.redoStack = [];
+      V.renderToolbar(this);
+    }
+
+    async undo() {
+      const e = this.undoStack.pop();
+      if (!e) {
+        // sem histórico: desfaz o último commit, e o Refazer passa a trazê-lo de volta
+        const n = this.undoStack.length;
+        await this.undoCommit();
+        if (this.undoStack.length > n) {
+          const done = this.undoStack.pop();
+          this.redoStack.push({ label: done.label, undo: done.redo, redo: done.undo });
+        }
+        return V.renderToolbar(this);
+      }
+      if (await this.op(`Desfazer ${e.label}`, () => e.undo(), { success: `Desfeito: ${e.label}` })) this.redoStack.push(e);
+      V.renderToolbar(this);
+    }
+
+    async redo() {
+      const e = this.redoStack.pop();
+      if (!e) return toast('Nada para refazer.');
+      if (await this.op(`Refazer ${e.label}`, () => e.redo(), { success: `Refeito: ${e.label}` })) this.undoStack.push(e);
+      V.renderToolbar(this);
+    }
+
+    async headState() {
+      const [sha, head] = await Promise.all([this.repo.raw(['rev-parse', '-q', '--verify', 'HEAD']), this.repo.head()]);
+      return { sha: sha.stdout.trim(), branch: head.branch };
+    }
+
+    async expectHead(state) {
+      const now = await this.headState();
+      if (now.sha !== state.sha || now.branch !== state.branch) throw new Error('O repositório mudou desde essa ação. Não dá para voltar com segurança.');
+    }
+
+    async recordHeadMove(label, before, mode) {
+      const after = await this.headState();
+      if (!before.sha || !after.sha || before.sha === after.sha || before.branch !== after.branch) return;
+      if ((await this.repo.state()) !== 'clean') return;
+      const flag = mode === 'soft' ? '--soft' : '--keep';
+      this.record({
+        label,
+        undo: async () => {
+          await this.expectHead(after);
+          await this.repo.run(['reset', flag, before.sha]);
+        },
+        redo: async () => {
+          await this.expectHead(before);
+          await this.repo.run(['reset', flag, after.sha]);
+        },
+      });
+    }
+
+    // Troca de branch: desfazer volta para onde estava.
+    recordSwitch(label, from, to) {
+      const go = (st) => this.repo.run(st.branch ? ['switch', st.branch] : ['switch', '--detach', st.sha]);
+      this.record({
+        label,
+        undo: async () => {
+          await this.expectHead(to);
+          await go(from);
+        },
+        redo: async () => {
+          await this.expectHead(from);
+          await go(to);
+        },
+      });
+    }
+
+    // Descartes guardam o patch do que sumiu; desfazer aplica de novo no diretório.
+    recordDiscard(label, patch) {
+      if (!patch) return;
+      this.record({
+        label,
+        undo: () => this.repo.applyPatch(patch, { cached: false }),
+        redo: () => this.repo.applyPatch(patch, { cached: false, reverse: true }),
+      });
+    }
+
+    async discardPatch(paths, untracked) {
+      const parts = [];
+      const tracked = paths.filter((p) => !untracked.includes(p));
+      if (tracked.length) parts.push((await this.repo.raw(['diff', '--binary', '--no-color', '--no-ext-diff', '--', ...tracked])).stdout);
+      for (const p of untracked) parts.push((await this.repo.raw(['diff', '--binary', '--no-color', '--no-index', '--', '/dev/null', p])).stdout);
+      const patch = parts.filter(Boolean).join('');
+      return patch || null;
     }
 
     // ---------- seleção ----------
@@ -529,7 +632,7 @@
       const diffSig = JSON.stringify(files);
       if (kind === v.kind && !v.loading && diffSig === v.diffSig) return;
       v.diffSig = diffSig;
-      Object.assign(v, { kind, files, loading: false });
+      Object.assign(v, { kind, files, loading: false, picked: new Set(), lastPick: null });
       this.renderCenter();
       V.renderRight(this);
     }
@@ -538,6 +641,32 @@
       this.view = { type: 'graph' };
       this.renderCenter();
       V.renderRight(this);
+    }
+
+    // ---------- histórico de um arquivo ----------
+    async openHistory(file) {
+      const v = (this.view = { type: 'history', file, loading: true, entries: [], sel: null, files: [] });
+      this.renderCenter();
+      try {
+        v.entries = await this.repo.fileHistory(file);
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+      if (this.view !== v) return;
+      v.loading = false;
+      if (v.entries.length) return this.historySelect(v.entries[0]);
+      this.renderCenter();
+    }
+
+    async historySelect(entry) {
+      const v = this.view;
+      if (v.type !== 'history') return;
+      Object.assign(v, { sel: entry.sha, files: [], diffLoading: true });
+      this.renderCenter();
+      const files = await this.repo.diff('commit', entry.path, entry.sha, entry.parents, entry.from);
+      if (this.view !== v || v.sel !== entry.sha) return;
+      Object.assign(v, { files, diffLoading: false });
+      this.renderCenter();
     }
 
     // ---------- stage / commit ----------
@@ -560,17 +689,23 @@
     }
 
     async discard(f) {
-      if (!(await confirmBox('Descartar alterações', `Descartar as alterações em "${f.path}"? Isso não pode ser desfeito.`, 'Descartar'))) return;
-      if (f.untracked) return this.op('Descartar', () => this.repo.run(['clean', '-f', '-q', '--', f.path]));
-      return this.op('Descartar', () => this.repo.run(['restore', '--worktree', '--', f.path]));
+      if (!(await confirmBox('Descartar alterações', `Descartar as alterações em "${f.path}"?\nDá para voltar pelo botão Desfazer enquanto o GitPolvo estiver aberto.`, 'Descartar'))) return;
+      const patch = await this.discardPatch([f.path], f.untracked ? [f.path] : []);
+      const ok = f.untracked
+        ? await this.op('Descartar', () => this.repo.run(['clean', '-f', '-q', '--', f.path]))
+        : await this.op('Descartar', () => this.repo.run(['restore', '--worktree', '--', f.path]));
+      if (ok) this.recordDiscard(`descarte de ${f.path}`, patch);
     }
 
     async discardAll() {
-      if (!(await confirmBox('Descartar tudo', 'Descartar TODAS as alterações não preparadas, incluindo arquivos novos? Isso não pode ser desfeito.', 'Descartar tudo'))) return;
-      return this.op('Descartar tudo', async () => {
+      if (!(await confirmBox('Descartar tudo', 'Descartar TODAS as alterações não preparadas, incluindo arquivos novos?\nDá para voltar pelo botão Desfazer enquanto o GitPolvo estiver aberto.', 'Descartar tudo'))) return;
+      const un = this.data.status.unstaged;
+      const patch = await this.discardPatch(un.map((f) => f.path), un.filter((f) => f.untracked).map((f) => f.path));
+      const ok = await this.op('Descartar tudo', async () => {
         await this.repo.run(['restore', '--worktree', '.']).catch(() => {});
         await this.repo.run(['clean', '-fd', '-q']);
       });
+      if (ok) this.recordDiscard('descartar tudo', patch);
     }
 
     stageHunk(file, hunk) {
@@ -582,8 +717,38 @@
     }
 
     async discardHunk(file, hunk) {
-      if (!(await confirmBox('Descartar hunk', 'Descartar este trecho de alterações? Isso não pode ser desfeito.', 'Descartar'))) return;
-      return this.op('Descartar hunk', () => this.repo.applyPatch(hunkPatch(file, hunk), { cached: false, reverse: true }));
+      if (!(await confirmBox('Descartar hunk', 'Descartar este trecho de alterações?', 'Descartar'))) return;
+      const patch = hunkPatch(file, hunk);
+      if (await this.op('Descartar hunk', () => this.repo.applyPatch(patch, { cached: false, reverse: true }))) this.recordDiscard('descarte do hunk', patch);
+    }
+
+    // Linhas marcadas no diff (Set de objetos de linha em view.picked).
+    async linesAction(action) {
+      const v = this.view;
+      const file = v.files && v.files[0];
+      if (!file || !v.picked || !v.picked.size) return;
+      const reverse = action !== 'stage';
+      const patch = linesPatch(file, (_hk, l) => v.picked.has(l), { reverse });
+      if (!patch) return;
+      const n = v.picked.size;
+      if (action === 'discard') {
+        if (!(await confirmBox('Descartar linhas', `Descartar ${n} linha(s) marcada(s)?`, 'Descartar'))) return;
+        if (await this.op('Descartar linhas', () => this.repo.applyPatch(patch, { cached: false, reverse: true }))) this.recordDiscard(`descarte de ${n} linha(s)`, patch);
+        return;
+      }
+      return this.op(action === 'stage' ? 'Stage das linhas' : 'Unstage das linhas', () => this.repo.applyPatch(patch, { cached: true, reverse }));
+    }
+
+    togglePick(line, hunk, range) {
+      const v = this.view;
+      v.picked ||= new Set();
+      if (range && v.lastPick && v.lastPick.hunk === hunk) {
+        const a = hunk.lines.indexOf(v.lastPick.line);
+        const b = hunk.lines.indexOf(line);
+        for (const l of hunk.lines.slice(Math.min(a, b), Math.max(a, b) + 1)) if (l.type === 'add' || l.type === 'del') v.picked.add(l);
+      } else if (v.picked.has(line)) v.picked.delete(line);
+      else v.picked.add(line);
+      v.lastPick = { line, hunk };
     }
 
     async ignore(file) {
@@ -615,7 +780,7 @@
       if (!d.summary.trim()) return;
       const args = ['commit', '-q', '-F', '-'];
       if (d.amend) args.push('--amend');
-      const ok = await this.op('Commit', () => this.repo.run(args, msg));
+      const ok = await this.op('Commit', () => this.repo.run(args, msg), { undoHead: 'soft', undoLabel: `${d.amend ? 'amend' : 'commit'} "${d.summary.trim()}"` });
       if (ok) {
         this.commitDraft = { summary: '', description: '', amend: false };
         V.renderRight(this);
@@ -629,7 +794,7 @@
       const head = this.commits.find((c) => c.sha === this.headSha);
       if (head && head.parents.length === 0) return toast('O primeiro commit do repositório não pode ser desfeito por aqui.', 'error');
       if (!(await confirmBox('Desfazer commit', `Desfazer o último commit "${head ? head.subject : 'HEAD'}"?\nAs alterações dele voltam para a área de preparação.`, 'Desfazer'))) return;
-      return this.op('Desfazer commit', () => this.repo.run(['reset', '--soft', 'HEAD~1']));
+      return this.op('Desfazer commit', () => this.repo.run(['reset', '--soft', 'HEAD~1']), { undoHead: 'soft', undoLabel: `commit "${head ? head.subject : 'HEAD'}"` });
     }
 
     // ---------- branches ----------
@@ -674,7 +839,9 @@
       if (!how) return;
       if (how === 'stash' && !(await this.stashThenSwitch(name))) return;
       const behind = !!(b && b.behind);
+      const from = await this.headState();
       const ok = await this.op(`Checkout de ${name}`, () => this.repo.run(['switch', name]), { success: behind ? undefined : `Agora em ${name}` });
+      if (ok) this.recordSwitch(`checkout de ${name}`, from, await this.headState());
       if (ok && behind) return this.pull();
     }
 
@@ -685,12 +852,18 @@
       const how = await this.confirmSwitchWithWip(name);
       if (!how) return;
       if (how === 'stash' && !(await this.stashThenSwitch(name))) return;
-      return this.op(`Checkout de ${full}`, () => this.repo.run(['switch', '--track', '-c', name, full]), { success: `Branch ${name} criada rastreando ${full}` });
+      const from = await this.headState();
+      const ok = await this.op(`Checkout de ${full}`, () => this.repo.run(['switch', '--track', '-c', name, full]), { success: `Branch ${name} criada rastreando ${full}` });
+      if (ok) this.recordSwitch(`checkout de ${full}`, from, await this.headState());
+      return ok;
     }
 
     async checkoutCommit(sha) {
       if (!(await confirmBox('Checkout de commit', `Fazer checkout de ${sha.slice(0, 7)}? Você ficará em modo "detached HEAD".`, 'Checkout'))) return;
-      return this.op('Checkout', () => this.repo.run(['switch', '--detach', sha]));
+      const from = await this.headState();
+      const ok = await this.op('Checkout', () => this.repo.run(['switch', '--detach', sha]));
+      if (ok) this.recordSwitch(`checkout de ${sha.slice(0, 7)}`, from, await this.headState());
+      return ok;
     }
 
     async createBranch(from) {
@@ -701,21 +874,52 @@
       if (!r || !r.name.trim()) return;
       const name = r.name.trim().replace(/\s+/g, '-');
       const base = from || 'HEAD';
-      return this.op('Criar branch', () => this.repo.run(r.checkout ? ['switch', '-c', name, base] : ['branch', name, base]), { success: `Branch ${name} criada` });
+      const before = await this.headState();
+      const ok = await this.op('Criar branch', () => this.repo.run(r.checkout ? ['switch', '-c', name, base] : ['branch', name, base]), { success: `Branch ${name} criada` });
+      if (!ok) return ok;
+      const sha = (await this.repo.run(['rev-parse', `refs/heads/${name}`])).trim();
+      const after = await this.headState();
+      this.record({
+        label: `criação da branch ${name}`,
+        undo: async () => {
+          if (r.checkout) {
+            await this.expectHead(after);
+            await this.repo.run(before.branch ? ['switch', before.branch] : ['switch', '--detach', before.sha]);
+          }
+          await this.repo.run(['branch', '-D', name]);
+        },
+        redo: async () => {
+          await this.repo.run(['branch', name, sha]);
+          if (r.checkout) await this.repo.run(['switch', name]);
+        },
+      });
+      return ok;
     }
 
     async renameBranch(name) {
       const nn = await prompt('Renomear branch', 'Novo nome', name, { ok: 'Renomear' });
       if (!nn || nn === name) return;
-      return this.op('Renomear branch', () => this.repo.run(['branch', '-m', name, nn]));
+      const ok = await this.op('Renomear branch', () => this.repo.run(['branch', '-m', name, nn]));
+      if (ok)
+        this.record({
+          label: `renomear ${name} para ${nn}`,
+          undo: () => this.repo.run(['branch', '-m', nn, name]),
+          redo: () => this.repo.run(['branch', '-m', name, nn]),
+        });
+      return ok;
     }
 
     async deleteBranch(name) {
       if (!(await confirmBox('Excluir branch', `Excluir a branch local "${name}"?`, 'Excluir'))) return;
-      const ok = await this.op('Excluir branch', () => this.repo.run(['branch', '-d', name]), { quiet: true });
-      if (ok) return;
-      if (await confirmBox('Branch não mesclada', `"${name}" tem commits que não estão em outra branch. Excluir mesmo assim?`, 'Forçar exclusão'))
-        return this.op('Excluir branch', () => this.repo.run(['branch', '-D', name]));
+      const sha = (await this.repo.run(['rev-parse', `refs/heads/${name}`])).trim();
+      const entry = {
+        label: `exclusão da branch ${name}`,
+        undo: () => this.repo.run(['branch', name, sha]),
+        redo: () => this.repo.run(['branch', '-D', name]),
+      };
+      if (await this.op('Excluir branch', () => this.repo.run(['branch', '-d', name]), { quiet: true })) return this.record(entry);
+      if (await confirmBox('Branch não mesclada', `"${name}" tem commits que não estão em outra branch. Excluir mesmo assim?\nDá para voltar pelo botão Desfazer enquanto o GitPolvo estiver aberto.`, 'Forçar exclusão'))
+        if (await this.op('Excluir branch', () => this.repo.run(['branch', '-D', name]))) this.record(entry);
     }
 
     async merge(name) {
@@ -731,7 +935,7 @@
           throw new Error(r.stderr || r.stdout);
         }
         toast(`Merge de ${name} concluído`);
-      });
+      }, { undoHead: 'keep', undoLabel: `merge de ${name}` });
     }
 
     // branch omitida = branch atual; senão o git faz checkout dela antes do rebase.
@@ -748,7 +952,7 @@
           }
           throw new Error(r.stderr || r.stdout);
         }
-      });
+      }, { undoHead: 'keep', undoLabel: `rebase de ${cur} sobre ${onto}` });
     }
 
     // ---------- arrastar branch sobre branch ----------
@@ -795,7 +999,7 @@
 
     fastForward(dst, src) {
       const srcRef = (src.type === 'local' ? 'refs/heads/' : 'refs/remotes/') + src.name;
-      if (dst === this.data.head.branch) return this.op(`Fast-forward de ${dst}`, () => this.repo.run(['merge', '--ff-only', srcRef]), { success: `${dst} avançou até ${src.name}` });
+      if (dst === this.data.head.branch) return this.op(`Fast-forward de ${dst}`, () => this.repo.run(['merge', '--ff-only', srcRef]), { success: `${dst} avançou até ${src.name}`, undoHead: 'keep' });
       // atualiza a branch sem precisar de checkout; o git recusa se não for fast-forward
       return this.op(`Fast-forward de ${dst}`, () => this.repo.run(['fetch', '.', `${srcRef}:refs/heads/${dst}`]), { success: `${dst} avançou até ${src.name}` });
     }
@@ -836,7 +1040,7 @@
           if (/conflict/i.test(r.stdout + r.stderr)) return toast('Cherry-pick com conflitos. Resolva e clique em "Continuar".', 'error');
           throw new Error(r.stderr || r.stdout);
         }
-      });
+      }, { undoHead: 'keep', undoLabel: `cherry-pick de ${sha.slice(0, 7)}` });
     }
 
     async revert(sha) {
@@ -847,7 +1051,7 @@
           if (/conflict/i.test(r.stdout + r.stderr)) return toast('Revert com conflitos. Resolva e clique em "Continuar".', 'error');
           throw new Error(r.stderr || r.stdout);
         }
-      });
+      }, { undoHead: 'keep', undoLabel: `revert de ${sha.slice(0, 7)}` });
     }
 
     // Aplica do mais antigo para o mais novo, como estavam no histórico.
@@ -861,7 +1065,7 @@
           throw new Error(r.stderr || r.stdout);
         }
         this.select('WIP');
-      });
+      }, { undoHead: 'keep', undoLabel: `cherry-pick de ${shas.length} commits` });
     }
 
     // Desfaz do mais novo para o mais antigo, um commit de revert para cada.
@@ -875,7 +1079,7 @@
           throw new Error(r.stderr || r.stdout);
         }
         this.select('WIP');
-      });
+      }, { undoHead: 'keep', undoLabel: `revert de ${shas.length} commits` });
     }
 
     // ---------- rebase interativo ----------
@@ -883,9 +1087,21 @@
     // o git lê a lista pronta (sequence.editor copia o arquivo) e os rewords
     // viram um "exec git commit --amend" logo depois do pick.
     async interactiveRebase(base) {
-      if (this.data.state !== 'clean') return toast('Finalize ou aborte a operação em andamento primeiro.', 'error');
+      const commits = await this.rebaseCommits(base);
+      if (!commits) return;
       const branch = this.data.head.branch;
-      if ((await this.repo.raw(['merge-base', '--is-ancestor', base, 'HEAD'])).code !== 0) return toast(`Esse commit não faz parte da branch ${branch}.`, 'error');
+      const plan = await V.rebaseEditor(this, commits, { branch, base: base.slice(0, 7) });
+      if (!plan) return;
+      return this.runRebasePlan(base, plan, `rebase interativo de ${branch}`);
+    }
+
+    // Commits de `base` (exclusivo) até o HEAD, do mais antigo para o mais novo.
+    // Avisa e devolve null quando não dá para reorganizar.
+    async rebaseCommits(base) {
+      if (this.data.state !== 'clean') return toast('Finalize ou aborte a operação em andamento primeiro.', 'error'), null;
+      const branch = this.data.head.branch;
+      if (!branch) return toast('Faça checkout de uma branch antes (agora está em detached HEAD).', 'error'), null;
+      if ((await this.repo.raw(['merge-base', '--is-ancestor', base, 'HEAD'])).code !== 0) return toast(`Esse commit não faz parte da branch ${branch}.`, 'error'), null;
       const out = await this.repo.run(['log', '--reverse', `--format=%H%x1f%P%x1f%an%x1f%B%x1e`, `${base}..HEAD`]);
       const commits = out
         .split('\x1e')
@@ -895,10 +1111,15 @@
           const [sha, parents, author, message] = rec.split('\x1f');
           return { sha, parents: parents.split(' ').filter(Boolean), author, message: message.trim() };
         });
-      if (!commits.length) return toast('Não há commits depois desse para reorganizar.');
-      if (commits.some((c) => c.parents.length > 1)) return toast('Há merges nesse intervalo. O rebase interativo só reorganiza commits sem merge.', 'error');
-      const plan = await V.rebaseEditor(this, commits, { branch, base: base.slice(0, 7) });
-      if (!plan) return;
+      if (!commits.length) return toast('Não há commits depois desse para reorganizar.'), null;
+      if (commits.some((c) => c.parents.length > 1)) return toast('Há merges nesse intervalo. O rebase interativo só reorganiza commits sem merge.', 'error'), null;
+      return commits;
+    }
+
+    // Reaplica os commits depois de `base` conforme o plano (mais antigo primeiro):
+    // o git lê a lista pronta (sequence.editor copia o arquivo) e os rewords
+    // viram um "exec git commit --amend" logo depois do pick.
+    async runRebasePlan(base, plan, label) {
       const gitDir = await this.repo.gitDir();
       const q = (p) => `'${p.replace(/'/g, `'\\''`)}'`;
       const todo = [];
@@ -911,7 +1132,8 @@
         } else todo.push(`${step.action === 'reword' ? 'pick' : step.action} ${step.sha}`);
       }
       await polvo.writeFile(gitDir, 'polvo-rebase-todo', todo.join('\n') + '\n');
-      return this.op(`Rebase interativo de ${branch}`, async () => {
+      const name = label[0].toUpperCase() + label.slice(1);
+      return this.op(name, async () => {
         const r = await this.repo.raw(['-c', `sequence.editor=cp ${q(gitDir + '/polvo-rebase-todo')}`, '-c', 'core.editor=true', 'rebase', '-i', '--autostash', base]);
         if (r.code !== 0) {
           if (/CONFLICT|could not apply/i.test(r.stdout + r.stderr)) {
@@ -921,8 +1143,31 @@
           }
           throw new Error(r.stderr || r.stdout);
         }
-        toast(`Rebase interativo de ${branch} concluído`);
+        toast(`${name} concluído`);
+      }, { undoHead: 'keep', undoLabel: label });
+    }
+
+    // Junta commits seguidos da branch atual num só, com a mensagem escolhida.
+    async squashCommits(list) {
+      const n = list.length;
+      const oldest = list[n - 1];
+      if (!oldest.parents.length) return toast('O primeiro commit do repositório não pode entrar no squash.', 'error');
+      const base = oldest.parents[0];
+      const commits = await this.rebaseCommits(base);
+      if (!commits) return;
+      const chosen = new Set(list.map((c) => c.sha));
+      const idx = commits.map((c, i) => (chosen.has(c.sha) ? i : -1)).filter((i) => i >= 0);
+      if (idx.length !== n) return toast(`Só dá para juntar commits da branch ${this.data.head.branch}.`, 'error');
+      if (idx[n - 1] - idx[0] !== n - 1) return toast('Escolha commits seguidos, sem outros no meio.', 'error');
+      const message = await V.messageEditor(`Juntar ${n} commits`, idx.map((i) => commits[i].message).join('\n\n'), {
+        ok: 'Juntar',
+        message: 'Mensagem do commit que fica no lugar deles. Isso reescreve o histórico: se já foram enviados, o próximo push vai precisar ser forçado.',
       });
+      if (message == null) return;
+      const plan = commits.map((c, i) =>
+        i === idx[0] ? { sha: c.sha, action: 'reword', message, original: '' } : { sha: c.sha, action: chosen.has(c.sha) ? 'fixup' : 'pick', message: c.message, original: c.message }
+      );
+      return this.runRebasePlan(base, plan, `squash de ${n} commits`);
     }
 
     async reset(sha) {
@@ -943,8 +1188,26 @@
         { ok: 'Reset', message: `Mover ${this.data.head.branch || 'HEAD'} para ${sha.slice(0, 7)}.` }
       );
       if (!r) return;
-      if (r.mode === 'hard' && !(await confirmBox('Reset hard', 'Todas as alterações não commitadas serão perdidas. Continuar?', 'Sim, descartar'))) return;
-      return this.op('Reset', () => this.repo.run(['reset', `--${r.mode}`, sha]));
+      if (r.mode === 'hard' && !(await confirmBox('Reset hard', 'As alterações não commitadas saem do diretório. Dá para voltar pelo botão Desfazer enquanto o GitPolvo estiver aberto. Continuar?', 'Sim, descartar'))) return;
+      // no hard, guarda as alterações num stash solto para o Desfazer conseguir trazer de volta
+      const saved = r.mode === 'hard' && this.hasDirtyWorktree() ? (await this.repo.run(['stash', 'create'])).trim() : '';
+      const before = await this.headState();
+      const ok = await this.op('Reset', () => this.repo.run(['reset', `--${r.mode}`, sha]));
+      const after = await this.headState();
+      if (ok && before.sha && before.sha !== after.sha)
+        this.record({
+          label: `reset ${r.mode} para ${sha.slice(0, 7)}`,
+          undo: async () => {
+            await this.expectHead(after);
+            await this.repo.run(['reset', `--${r.mode}`, before.sha]);
+            if (saved) await this.repo.run(['stash', 'apply', saved]);
+          },
+          redo: async () => {
+            await this.expectHead(before);
+            await this.repo.run(['reset', `--${r.mode}`, after.sha]);
+          },
+        });
+      return ok;
     }
 
     async createTag(sha) {
@@ -954,12 +1217,22 @@
       ], { ok: 'Criar', message: `No commit ${sha === 'HEAD' ? 'HEAD' : sha.slice(0, 7)}` });
       if (!r || !r.name.trim()) return;
       const args = r.message.trim() ? ['tag', '-a', r.name.trim(), '-m', r.message.trim(), sha] : ['tag', r.name.trim(), sha];
-      return this.op('Criar tag', () => this.repo.run(args), { success: `Tag ${r.name.trim()} criada` });
+      const name = r.name.trim();
+      const ok = await this.op('Criar tag', () => this.repo.run(args), { success: `Tag ${name} criada` });
+      if (ok) {
+        const obj = (await this.repo.run(['rev-parse', `refs/tags/${name}`])).trim();
+        this.record({ label: `criação da tag ${name}`, undo: () => this.repo.run(['tag', '-d', name]), redo: () => this.repo.run(['update-ref', `refs/tags/${name}`, obj]) });
+      }
+      return ok;
     }
 
     async deleteTag(name) {
       if (!(await confirmBox('Excluir tag', `Excluir a tag local "${name}"?`, 'Excluir'))) return;
-      return this.op('Excluir tag', () => this.repo.run(['tag', '-d', name]));
+      // guarda o objeto da tag (anotada ou não) para o Desfazer recriar igual
+      const obj = (await this.repo.run(['rev-parse', `refs/tags/${name}`])).trim();
+      const ok = await this.op('Excluir tag', () => this.repo.run(['tag', '-d', name]));
+      if (ok) this.record({ label: `exclusão da tag ${name}`, undo: () => this.repo.run(['update-ref', `refs/tags/${name}`, obj]), redo: () => this.repo.run(['tag', '-d', name]) });
+      return ok;
     }
 
     async pushTag(name) {
@@ -1029,7 +1302,7 @@
           throw new Error(r.stderr || r.stdout);
         }
         toast(/Already up to date/i.test(r.stdout) ? 'Já está atualizado' : 'Pull concluído');
-      });
+      }, { undoHead: 'keep', undoLabel: 'pull' });
     }
 
     pushRemote(b) {
@@ -1285,6 +1558,7 @@
       const n = list.length;
       return [
         n === 2 && { label: 'Comparar os dois', action: () => V.renderRight(this) },
+        { label: `Juntar ${n} commits (squash)...`, action: () => this.squashCommits(list) },
         { label: `Cherry-pick de ${n} commits`, action: () => this.cherryPickMany(list) },
         { label: `Reverter ${n} commits`, action: () => this.revertMany(list) },
         '-',
@@ -1558,6 +1832,7 @@
       document.documentElement.dataset.theme = s.theme || 'dark';
       UI.avatars.enabled = s.avatars !== false;
       V.setColumnPrefs(s.columns);
+      V.setDiffPrefs(s.diffSplit);
       for (const p of s.openTabs || []) {
         const v = await polvo.repo.validate(p);
         if (v.ok) this.addTab(new RepoTab(this, v.root), false);
@@ -1826,7 +2101,8 @@
           ['Stash pop', 'repo:pop'],
           ['Stage em tudo', 'repo:stageAll'],
           ['Unstage em tudo', 'repo:unstageAll'],
-          ['Desfazer último commit', 'repo:undo'],
+          ['Desfazer', 'repo:undo'],
+          ['Refazer', 'repo:redo'],
           ['Nova tag no HEAD', 'repo:tag'],
           ['Adicionar remoto', 'repo:addRemote'],
           ['Abrir terminal', 'repo:terminal'],
@@ -1901,6 +2177,12 @@
           return this.openWhatsNew();
         case 'help:updates':
           return this.checkUpdates();
+        case 'edit:undo':
+        case 'edit:redo': {
+          const field = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName);
+          if (field || !t) return document.execCommand(name === 'edit:undo' ? 'undo' : 'redo');
+          return name === 'edit:undo' ? t.undo() : t.redo();
+        }
       }
       if (!needRepo()) return;
       switch (name) {
@@ -1927,7 +2209,9 @@
         case 'repo:unstageAll':
           return t.unstageAll();
         case 'repo:undo':
-          return t.undoCommit();
+          return t.undo();
+        case 'repo:redo':
+          return t.redo();
         case 'repo:tag':
           return t.createTag('HEAD');
         case 'repo:addRemote':
@@ -1976,6 +2260,14 @@
         return;
       }
       if (inField || !t) return;
+      if (mod && !e.altKey && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
+        e.preventDefault();
+        return t.redo();
+      }
+      if (mod && !e.altKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        return t.undo();
+      }
       if (e.key === 'Escape' && t.view.type !== 'graph') return t.closeView();
       if (e.key === 'Escape' && (t.multi.length || t.compare)) return t.clearMulti();
       if (e.key === 'ArrowDown' || e.key === 'j') {

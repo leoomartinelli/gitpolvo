@@ -154,6 +154,7 @@
   }
   const TB = {
     undo: '<path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.35"/><path d="M4.5 4.6v5.3h5.3"/>',
+    redo: '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.35"/><path d="M19.5 4.6v5.3h-5.3"/>',
     pull: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/>',
     push: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/>',
     fetch: '<path d="M20.5 3.2v5h-5"/><path d="M4 12a8 8 0 0 1 13.7-5.6L20.5 8.2"/><path d="M3.5 20.8v-5h5"/><path d="M20 12a8 8 0 0 1-13.7 5.6L3.5 15.8"/>',
@@ -249,7 +250,18 @@
       left.append(h('div', { class: 'branch-busy', role: 'status', title: tab.busy }, polvoBusySvg(), h('span', { class: 'branch-busy-msg' }, tab.busy)));
     }
     center.append(
-      tbButton(TB.undo, 'Desfazer', 'Desfazer último commit (mantém alterações)', () => tab.undoCommit()),
+      tbButton(
+        TB.undo,
+        'Desfazer',
+        tab.undoStack.length ? `Desfazer ${tab.undoStack[tab.undoStack.length - 1].label} (Ctrl+Z)` : 'Desfazer último commit, mantendo as alterações (Ctrl+Z)',
+        () => tab.undo()
+      ),
+      (() => {
+        const last = tab.redoStack[tab.redoStack.length - 1];
+        const b = tbButton(TB.redo, 'Refazer', last ? `Refazer ${last.label} (Ctrl+Shift+Z)` : 'Nada para refazer', () => tab.redo());
+        b.disabled = !last;
+        return b;
+      })(),
       h('div', { class: 'tb-sep' }),
       pullBtn,
       tbButton(TB.push, 'Push' + (localCur?.ahead ? ` (${localCur.ahead})` : ''), 'Push', () => tab.push()),
@@ -736,6 +748,13 @@
     ['sha', 'SHA'],
   ];
 
+  // Diff unificado ou lado a lado, salvo nas configurações.
+  const diffPrefs = { split: false };
+
+  function setDiffPrefs(split) {
+    diffPrefs.split = !!split;
+  }
+
   function setColumnPrefs(prefs) {
     const show = { ...colPrefs.show, ...((prefs && prefs.show) || {}) };
     Object.assign(colPrefs, prefs || {}, { show });
@@ -971,7 +990,7 @@
   }
 
   // Agrupa caminhos em pastas; pastas recolhíveis, estado guardado na aba.
-  function renderTree(tab, container, files, sel, open) {
+  function renderTree(tab, container, files, sel, open, menu) {
     const root = { dirs: new Map(), files: [] };
     for (const f of files) {
       const parts = f.path.split('/');
@@ -1014,7 +1033,7 @@
         if (!collapsed) walk(cur, key + '/', depth + 1);
       }
       for (const f of node.files) {
-        const row = fileRow(f, { selected: sel === f.path, onclick: () => open(f) });
+        const row = fileRow(f, { selected: sel === f.path, onclick: () => open(f), oncontextmenu: menu && menu(f) });
         row.style.paddingLeft = 8 + depth * 14 + 'px';
         container.append(row);
       }
@@ -1108,6 +1127,7 @@
       h(
         'div',
         { class: 'multi-actions' },
+        h('button', { class: 'btn small', onclick: () => tab.squashCommits(list) }, `Juntar (${list.length})`),
         h('button', { class: 'btn small', onclick: () => tab.cherryPickMany(list) }, `Cherry-pick (${list.length})`),
         h('button', { class: 'btn small', onclick: () => tab.revertMany(list) }, `Reverter (${list.length})`)
       ),
@@ -1209,6 +1229,7 @@
                     { label: 'Ignorar (adicionar ao .gitignore)', action: () => tab.ignore(f.path) },
                     /\.[^./]+$/.test(f.path) && { label: `Ignorar todos os *${f.path.match(/\.[^./]+$/)[0]}`, action: () => tab.ignore('*' + f.path.match(/\.[^./]+$/)[0]) },
                     { label: 'Copiar caminho', action: () => navigator.clipboard.writeText(f.path) },
+                    !f.untracked && { label: 'Histórico do arquivo', action: () => tab.openHistory(f.path) },
                   ]);
                 },
                 actions: h(
@@ -1243,7 +1264,10 @@
                 onclick: () => tab.openDiff('staged', f.path),
                 oncontextmenu: (e) => {
                   e.preventDefault();
-                  showMenu(e.clientX, e.clientY, [{ label: 'Unstage', action: () => tab.unstage([f.path]) }]);
+                  showMenu(e.clientX, e.clientY, [
+                    { label: 'Unstage', action: () => tab.unstage([f.path]) },
+                    { label: 'Histórico do arquivo', action: () => tab.openHistory(f.path) },
+                  ]);
                 },
                 actions: h(
                   'button',
@@ -1370,8 +1394,15 @@
       files.sort((a, b) => (fv.desc ? -1 : 1) * a.path.localeCompare(b.path));
       listBox.innerHTML = '';
       const open = (f) => f.status && tab.openDiff('commit', f.path, d.sha, d.parents);
-      if (fv.mode === 'tree') renderTree(tab, listBox, files, sel, open);
-      else listBox.append(...files.map((f) => fileRow(f, { selected: sel === f.path, onclick: () => open(f) })));
+      const menu = (f) => (e) => {
+        e.preventDefault();
+        showMenu(e.clientX, e.clientY, [
+          { label: 'Histórico do arquivo', action: () => tab.openHistory(f.path) },
+          { label: 'Copiar caminho', action: () => navigator.clipboard.writeText(f.path) },
+        ]);
+      };
+      if (fv.mode === 'tree') renderTree(tab, listBox, files, sel, open, menu);
+      else listBox.append(...files.map((f) => fileRow(f, { selected: sel === f.path, onclick: () => open(f), oncontextmenu: menu(f) })));
     };
     const seg = (mode, label, svgText) =>
       h(
@@ -1449,9 +1480,88 @@
   }
 
   // ---------- diff ----------
+  function diffModeToggle(tab) {
+    const seg = (split, label) =>
+      h(
+        'button',
+        {
+          class: 'seg-btn' + (diffPrefs.split === split ? ' active' : ''),
+          onclick: () => {
+            diffPrefs.split = split;
+            window.polvo.settings.set({ diffSplit: split });
+            tab.renderCenter();
+          },
+        },
+        label
+      );
+    return h('div', { class: 'seg' }, seg(false, 'Unificado'), seg(true, 'Lado a lado'));
+  }
+
+  // Linhas de remoção e adição de um trecho pareadas uma ao lado da outra.
+  function splitRows(hk) {
+    const rows = [];
+    let dels = [];
+    let adds = [];
+    const flush = () => {
+      for (let i = 0; i < Math.max(dels.length, adds.length); i++) rows.push({ left: dels[i] || null, right: adds[i] || null });
+      dels = [];
+      adds = [];
+    };
+    for (const l of hk.lines) {
+      if (l.type === 'del') {
+        if (adds.length) flush();
+        dels.push(l);
+      } else if (l.type === 'add') adds.push(l);
+      else {
+        flush();
+        rows.push(l.type === 'ctx' ? { left: l, right: l } : { meta: l });
+      }
+    }
+    flush();
+    return rows;
+  }
+
+  // Corpo do diff (unificado ou lado a lado). Com `pick`, as linhas alteradas
+  // ficam clicáveis para stage/unstage/descarte por linha.
+  function diffBody(files, { pick, hunkActions } = {}) {
+    const body = h('div', { class: 'diff-body' + (diffPrefs.split ? ' split' : '') });
+    for (const f of files) {
+      if (f.binary) {
+        body.append(h('div', { class: 'empty' }, 'Arquivo binário — diff não exibido.'));
+        continue;
+      }
+      for (const hk of f.hunks) {
+        const cell = (l, side) => {
+          if (!l) return h('div', { class: 'dl empty-side' }, h('span', { class: 'ln' }), h('span', { class: 'code' }));
+          const n = side === 'left' ? l.old : side === 'right' ? l.new : null;
+          const canPick = pick && (l.type === 'add' || l.type === 'del');
+          const el = h(
+            'div',
+            { class: 'dl ' + l.type + (canPick ? ' pickable' : '') + (canPick && pick.has(l) ? ' picked' : ''), title: canPick ? 'Clique para marcar a linha (Shift: intervalo)' : null },
+            side ? h('span', { class: 'ln' }, n ?? '') : [h('span', { class: 'ln' }, l.old ?? ''), h('span', { class: 'ln' }, l.new ?? '')],
+            h('span', { class: 'code' }, l.text)
+          );
+          if (canPick) {
+            el.line = l;
+            el.addEventListener('click', (e) => pick.toggle(l, hk, e.shiftKey));
+          }
+          return el;
+        };
+        const lines = diffPrefs.split
+          ? splitRows(hk).map((r) =>
+              r.meta ? h('div', { class: 'dl meta' }, h('span', { class: 'code' }, r.meta.text)) : h('div', { class: 'split-row' }, cell(r.left, 'left'), cell(r.right, 'right'))
+            )
+          : hk.lines.map((l) => cell(l));
+        body.append(h('div', { class: 'hunk' }, h('div', { class: 'hunk-head' }, h('span', { class: 'grow mono' }, hk.header), hunkActions ? hunkActions(f, hk) : null), lines));
+      }
+    }
+    return body;
+  }
+
   function renderDiff(tab) {
     const C = tab.els.center;
     const v = tab.view;
+    const prevScroll = C.querySelector('.diff-body')?.scrollTop || 0;
     C.innerHTML = '';
     const actions = [];
     if (v.kind === 'unstaged' || v.kind === 'untracked') {
@@ -1461,6 +1571,37 @@
       actions.push(h('button', { class: 'btn small', onclick: () => tab.unstage([v.file]) }, 'Unstage arquivo'));
     }
     const label = v.label || { unstaged: 'não preparado', untracked: 'novo arquivo', staged: 'preparado', commit: v.sha ? 'commit ' + v.sha.slice(0, 7) : '' }[v.kind];
+    // barra das linhas marcadas: atualizada sem redesenhar o diff
+    const pickBar = h('div', { class: 'pick-bar' });
+    const linesMode = v.kind === 'unstaged' || v.kind === 'staged';
+    const updatePickBar = () => {
+      pickBar.innerHTML = '';
+      const n = v.picked ? v.picked.size : 0;
+      pickBar.classList.toggle('hidden', !linesMode);
+      if (!linesMode) return;
+      if (!n) return pickBar.append(h('span', { class: 'dim' }, 'Clique nas linhas verdes/vermelhas para escolher só algumas'));
+      pickBar.append(h('span', {}, `${n} linha(s) marcada(s)`), h('span', { class: 'grow' }));
+      if (v.kind === 'unstaged')
+        pickBar.append(
+          h('button', { class: 'btn small danger', onclick: () => tab.linesAction('discard') }, 'Descartar linhas'),
+          h('button', { class: 'btn small primary', onclick: () => tab.linesAction('stage') }, 'Stage das linhas')
+        );
+      else pickBar.append(h('button', { class: 'btn small', onclick: () => tab.linesAction('unstage') }, 'Unstage das linhas'));
+      pickBar.append(
+        h(
+          'button',
+          {
+            class: 'icon-btn',
+            title: 'Desmarcar',
+            onclick: () => {
+              v.picked.clear();
+              renderDiff(tab);
+            },
+          },
+          '✕'
+        )
+      );
+    };
     C.append(
       h(
         'div',
@@ -1468,35 +1609,106 @@
         h('span', { class: 'path', title: v.file }, v.file),
         h('span', { class: 'dim' }, label),
         actions,
+        diffModeToggle(tab),
+        v.kind !== 'untracked' ? h('button', { class: 'btn small', title: 'Commits que mexeram neste arquivo', onclick: () => tab.openHistory(v.file) }, 'Histórico') : null,
+        h('button', { class: 'icon-btn', title: 'Fechar (Esc)', onclick: () => tab.closeView() }, '✕')
+      ),
+      pickBar
+    );
+    updatePickBar();
+    const files = v.files || [];
+    if (!files.length) {
+      C.append(h('div', { class: 'empty' }, v.loading ? 'Carregando...' : 'Sem diferenças de conteúdo (talvez apenas permissão ou renomeação).'));
+      return;
+    }
+    v.picked ||= new Set();
+    const pick = linesMode && {
+      has: (l) => v.picked.has(l),
+      toggle: (l, hk, range) => {
+        tab.togglePick(l, hk, range);
+        for (const el of body.querySelectorAll('.dl.pickable')) el.classList.toggle('picked', v.picked.has(el.line));
+        updatePickBar();
+      },
+    };
+    const hunkActions = (f, hk) => {
+      if (v.kind === 'unstaged')
+        return [
+          h('button', { class: 'btn small danger', onclick: () => tab.discardHunk(f, hk) }, 'Descartar hunk'),
+          h('button', { class: 'btn small', onclick: () => tab.stageHunk(f, hk) }, 'Stage hunk'),
+        ];
+      if (v.kind === 'staged') return h('button', { class: 'btn small', onclick: () => tab.unstageHunk(f, hk) }, 'Unstage hunk');
+      return null;
+    };
+    const body = diffBody(files, { pick, hunkActions });
+    C.append(body);
+    body.scrollTop = prevScroll;
+  }
+
+  // ---------- histórico de um arquivo ----------
+  function renderHistory(tab) {
+    const C = tab.els.center;
+    const v = tab.view;
+    const prevList = C.querySelector('.history-list')?.scrollTop || 0;
+    const prevDiff = C.querySelector('.diff-body')?.scrollTop || 0;
+    C.innerHTML = '';
+    C.append(
+      h(
+        'div',
+        { class: 'diff-head' },
+        h('span', { class: 'path', title: v.file }, 'Histórico de ', v.file),
+        h('span', { class: 'dim' }, v.loading ? 'carregando...' : `${v.entries.length} commit(s)`),
+        diffModeToggle(tab),
         h('button', { class: 'icon-btn', title: 'Fechar (Esc)', onclick: () => tab.closeView() }, '✕')
       )
     );
-    const body = h('div', { class: 'diff-body' });
+    if (v.loading) return C.append(h('div', { class: 'empty' }, 'Carregando...'));
+    if (!v.entries.length) return C.append(h('div', { class: 'empty' }, 'Nenhum commit mexeu neste arquivo ainda.'));
+    const list = h(
+      'div',
+      { class: 'history-list' },
+      v.entries.map((e) =>
+        h(
+          'div',
+          { class: 'history-row' + (v.sel === e.sha ? ' selected' : ''), onclick: () => tab.historySelect(e), title: e.from ? `${e.from} → ${e.path}` : e.path },
+          avatar(e.author, e.email, false, tab.avatarCtx(e.sha)),
+          h('span', { class: 'grow ellip' }, e.subject),
+          e.from ? h('span', { class: 'dim small' }, 'renomeado') : null,
+          h('span', { class: 'dim small ellip history-author' }, e.author),
+          h('span', { class: 'dim small', title: fullDate(e.date) }, relDate(e.date)),
+          h('span', { class: 'mono dim link', title: 'Ver no grafo', onclick: (ev) => (ev.stopPropagation(), tab.selectSha(e.sha)) }, e.sha.slice(0, 7))
+        )
+      )
+    );
+    C.append(list);
+    list.scrollTop = prevList;
+    const body = v.diffLoading ? h('div', { class: 'diff-body' }, h('div', { class: 'empty' }, 'Carregando...')) : diffBody(v.files);
+    if (!v.diffLoading && !v.files.length) body.append(h('div', { class: 'empty' }, 'Sem diferenças de conteúdo neste commit.'));
     C.append(body);
-    const files = v.files || [];
-    if (!files.length) {
-      body.append(h('div', { class: 'empty' }, v.loading ? 'Carregando...' : 'Sem diferenças de conteúdo (talvez apenas permissão ou renomeação).'));
-      return;
-    }
-    for (const f of files) {
-      if (f.binary) {
-        body.append(h('div', { class: 'empty' }, 'Arquivo binário — diff não exibido.'));
-        continue;
-      }
-      for (const hk of f.hunks) {
-        const hunkActions = [];
-        if (v.kind === 'unstaged') {
-          hunkActions.push(h('button', { class: 'btn small danger', onclick: () => tab.discardHunk(f, hk) }, 'Descartar hunk'));
-          hunkActions.push(h('button', { class: 'btn small', onclick: () => tab.stageHunk(f, hk) }, 'Stage hunk'));
-        } else if (v.kind === 'staged') {
-          hunkActions.push(h('button', { class: 'btn small', onclick: () => tab.unstageHunk(f, hk) }, 'Unstage hunk'));
-        }
-        const lines = hk.lines.map((l) =>
-          h('div', { class: 'dl ' + l.type }, h('span', { class: 'ln' }, l.old ?? ''), h('span', { class: 'ln' }, l.new ?? ''), h('span', { class: 'code' }, l.text))
-        );
-        body.append(h('div', { class: 'hunk' }, h('div', { class: 'hunk-head' }, h('span', { class: 'grow mono' }, hk.header), hunkActions), lines));
-      }
-    }
+    body.scrollTop = prevDiff;
+  }
+
+  // Janela simples com um campo de mensagem (usada no squash).
+  function messageEditor(title, text, { ok = 'OK', message } = {}) {
+    return new Promise((resolve) => {
+      openModal(
+        (close) => {
+          const area = h('textarea', { class: 'msg-editor', spellcheck: 'true', rows: 10 });
+          area.value = text;
+          const okBtn = h('button', { class: 'btn primary', onclick: () => area.value.trim() && close(area.value.trim()) }, ok);
+          area.addEventListener('input', () => (okBtn.disabled = !area.value.trim()));
+          area.addEventListener('keydown', (e) => e.key === 'Enter' && (e.ctrlKey || e.metaKey) && okBtn.click());
+          return h(
+            'div',
+            { class: 'modal wide' },
+            h('h2', {}, title),
+            message ? h('div', { class: 'msg dim' }, message) : null,
+            area,
+            h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => close(null) }, 'Cancelar'), okBtn)
+          );
+        },
+        { onClose: resolve }
+      );
+    });
   }
 
   // ---------- resolução de conflitos ----------
@@ -1727,5 +1939,5 @@
     });
   }
 
-  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, rebaseEditor, ROW_H };
+  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, renderHistory, rebaseEditor, messageEditor, setDiffPrefs, ROW_H };
 })();

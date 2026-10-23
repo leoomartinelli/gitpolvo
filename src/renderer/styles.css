@@ -2621,3 +2621,104 @@ button.sb-item:hover {
   font-size: 12.5px;
   min-height: 1em;
 }
+
+/* ---------- stage por linha ---------- */
+.pick-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  min-height: 30px;
+  flex-shrink: 0;
+}
+
+.pick-bar .grow {
+  flex: 1;
+}
+
+.dl.pickable {
+  cursor: pointer;
+}
+
+.dl.pickable:hover {
+  filter: brightness(1.25);
+}
+
+.dl.picked {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.dl.add.picked {
+  background: rgba(46, 160, 67, 0.42);
+}
+
+.dl.del.picked {
+  background: rgba(248, 81, 73, 0.38);
+}
+
+/* ---------- diff lado a lado ---------- */
+.diff-head .seg {
+  flex: none;
+}
+
+.split-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.diff-body.split .dl {
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.split-row > .dl + .dl {
+  border-left: 1px solid var(--border);
+}
+
+.dl.empty-side {
+  background: var(--bg-2);
+}
+
+/* ---------- histórico de arquivo ---------- */
+.history-list {
+  max-height: 38%;
+  min-height: 90px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.history-row:hover {
+  background: var(--bg-hover);
+}
+
+.history-row.selected {
+  background: var(--bg-sel);
+}
+
+.history-row .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.history-author {
+  max-width: 140px;
+}
+
+.msg-editor {
+  width: 100%;
+  font-family: var(--mono);
+  resize: vertical;
+}

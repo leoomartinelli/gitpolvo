@@ -13,6 +13,14 @@
 
 # Novidades
 
+## Desfazer de verdade, stage por linha e histórico do arquivo
+
+- Desfazer e Refazer (Ctrl+Z / Ctrl+Shift+Z) valem para commit, amend, checkout, criar/renomear/excluir branch e tag, descartes, reset, merge, rebase, pull, cherry-pick e revert, enquanto o GitPolvo estiver aberto
+- No diff, clique nas linhas para fazer stage, unstage ou descartar só elas (Shift+clique marca um intervalo)
+- Diff lado a lado, além do unificado; a escolha fica salva
+- Histórico do arquivo (botão no diff ou botão direito no arquivo), seguindo renomeações, com o diff de cada commit
+- Juntar (squash) commits seguidos marcados com Ctrl/Shift+clique, escolhendo a mensagem final
+
 ## Grafo sem limite, filtros, seleção múltipla e rebase interativo
 
 - O grafo carrega mais commits ao chegar no fim da rolagem, em vez de parar nos 3000 primeiros
