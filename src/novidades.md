@@ -13,6 +13,14 @@
 
 # Novidades
 
+## Merge com opções, excluir várias branches, stash escolhido e remotos
+
+- "Merge com opções..." no menu da branch: sempre criar commit de merge (--no-ff), só avançar (--ff-only) ou squash, que deixa as mudanças preparadas com a mensagem sugerida
+- Excluir local e remota de uma vez, e "⋯ → Excluir várias branches" na seção Local, mostrando quais já estão mescladas
+- Tags: "Excluir tag no remoto" e "⋯ → Enviar todas as tags"
+- Stash só do que está preparado, só de um arquivo (botão direito) ou de arquivos escolhidos, pela setinha do botão Stash
+- Remotos: editar a URL e renomear pelo botão direito
+
 ## Realce de sintaxe, editor embutido e mensagem de commits antigos
 
 - O diff tem realce de sintaxe (PHP, JavaScript/TypeScript, Python, Java, C#, Go, SQL, CSS, HTML, JSON, shell e outras) e destaca as palavras que mudaram dentro da linha

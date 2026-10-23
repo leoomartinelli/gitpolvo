@@ -1047,10 +1047,13 @@
         if (await this.op('Excluir branch', () => this.repo.run(['branch', '-D', name]))) this.record(entry);
     }
 
-    async merge(name) {
+    // mode: undefined (fast-forward quando der), 'no-ff', 'ff-only' ou 'squash'
+    async merge(name, mode) {
       const cur = this.data.head.branch || 'HEAD';
+      if (mode === 'squash') return this.squashMerge(name);
+      const flag = mode === 'no-ff' ? ['--no-ff'] : mode === 'ff-only' ? ['--ff-only'] : [];
       return this.op(`Merge de ${name} em ${cur}`, async () => {
-        const r = await this.repo.raw(['merge', '--no-edit', name]);
+        const r = await this.repo.raw(['merge', '--no-edit', ...flag, name]);
         if (r.code !== 0) {
           if (/CONFLICT/.test(r.stdout + r.stderr)) {
             toast('Merge com conflitos. Resolva os arquivos marcados no painel à direita.', 'error');
@@ -1061,6 +1064,42 @@
         }
         toast(`Merge de ${name} concluído`);
       }, { undoHead: 'keep', undoLabel: `merge de ${name}` });
+    }
+
+    async mergeOptions(name) {
+      const cur = this.data.head.branch || 'HEAD';
+      const r = await form(
+        `Merge de ${name} em ${cur}`,
+        [
+          {
+            name: 'mode',
+            label: 'Como juntar',
+            value: 'default',
+            options: [
+              { value: 'default', label: 'Padrão: avança a branch se der (fast-forward), senão cria um commit de merge' },
+              { value: 'no-ff', label: 'Sempre criar um commit de merge (--no-ff)' },
+              { value: 'ff-only', label: 'Só avançar a branch; recusa se precisar de commit de merge (--ff-only)' },
+              { value: 'squash', label: 'Squash: junta tudo num commit novo, que você revisa antes (--squash)' },
+            ],
+          },
+        ],
+        { ok: 'Merge' }
+      );
+      if (r) return this.merge(name, r.mode === 'default' ? undefined : r.mode);
+    }
+
+    // As mudanças de `name` ficam preparadas, com a mensagem sugerida no painel.
+    async squashMerge(name) {
+      const cur = this.data.head.branch || 'HEAD';
+      const ok = await this.op(`Squash de ${name} em ${cur}`, async () => {
+        const r = await this.repo.raw(['merge', '--squash', name]);
+        if (r.code !== 0 && !/CONFLICT/.test(r.stdout + r.stderr)) throw new Error(r.stderr || r.stdout);
+        if (r.code !== 0) toast('O squash gerou conflitos. Resolva os arquivos e faça o commit.', 'error');
+      });
+      if (!ok) return;
+      const subjects = (await this.repo.raw(['log', '--reverse', '--format=- %s', `HEAD..${name}`])).stdout.trim();
+      this.commitDraft = { summary: `Squash de ${name}`, description: subjects, amend: false };
+      this.select('WIP'); // o painel já mostra o preparado e a mensagem sugerida
     }
 
     // branch omitida = branch atual; senão o git faz checkout dela antes do rebase.
@@ -1561,6 +1600,25 @@
       if (ok) this.fetch();
     }
 
+    async editRemoteUrl(name) {
+      const url = (await this.repo.run(['remote', 'get-url', name])).trim();
+      const next = await prompt(`URL de ${name}`, 'Endereço do repositório (https ou ssh)', url, { ok: 'Salvar' });
+      if (!next || next === url) return;
+      const ok = await this.op('Editar remoto', () => this.repo.run(['remote', 'set-url', name, next]), { success: `${name} agora aponta para ${next}` });
+      if (ok) {
+        this.web = undefined; // o site do commit pode ter mudado
+        this.github = undefined;
+        this.record({ label: `URL de ${name}`, undo: () => this.repo.run(['remote', 'set-url', name, url]), redo: () => this.repo.run(['remote', 'set-url', name, next]) });
+      }
+    }
+
+    async renameRemote(name) {
+      const next = await prompt('Renomear remoto', 'Novo nome', name, { ok: 'Renomear' });
+      if (!next || next === name) return;
+      const ok = await this.op('Renomear remoto', () => this.repo.run(['remote', 'rename', name, next]), { success: `Remoto ${name} agora é ${next}` });
+      if (ok) this.record({ label: `renomear remoto ${name}`, undo: () => this.repo.run(['remote', 'rename', next, name]), redo: () => this.repo.run(['remote', 'rename', name, next]) });
+    }
+
     async removeRemote(name) {
       if (!(await confirmBox('Remover remoto', `Remover o remoto "${name}" (não apaga nada no servidor)?`, 'Remover'))) return;
       return this.op('Remover remoto', () => this.repo.run(['remote', 'remove', name]));
@@ -1572,13 +1630,37 @@
     }
 
     // ---------- stash ----------
-    async stash() {
-      if (!this.hasWip()) return toast('Não há alterações para guardar.');
-      const msg = await prompt('Stash', 'Mensagem (opcional)', '', { ok: 'Guardar' });
+    // what: undefined (tudo), 'staged' (só o preparado) ou uma lista de caminhos
+    async stash(what) {
+      if (!this.hasDirtyWorktree()) return toast('Não há alterações para guardar.');
+      if (what === 'staged' && !this.data.status.staged.length) return toast('Nada preparado para guardar.');
+      const title = what === 'staged' ? 'Stash do que está preparado' : Array.isArray(what) ? `Stash de ${what.length} arquivo(s)` : 'Stash';
+      const msg = await prompt(title, 'Mensagem (opcional)', '', { ok: 'Guardar' });
       if (msg === null) return;
       const args = ['stash', 'push', '--include-untracked'];
+      if (what === 'staged') args.splice(2, 1, '--staged');
       if (msg) args.push('-m', msg);
+      if (Array.isArray(what)) args.push('--', ...what);
       return this.op('Stash', () => this.repo.run(args), { success: 'Alterações guardadas no stash' });
+    }
+
+    // Janela para escolher quais arquivos alterados vão para o stash.
+    async stashPick() {
+      const st = this.data.status;
+      const paths = [...new Set([...st.staged, ...st.unstaged].map((f) => f.path))];
+      if (!paths.length) return toast('Não há alterações para guardar.');
+      const r = await form('Stash de arquivos escolhidos', paths.map((p, i) => ({ name: 'f' + i, type: 'checkbox', label: p, value: false })), { ok: 'Continuar', wide: true });
+      if (!r) return;
+      const chosen = paths.filter((_, i) => r['f' + i]);
+      if (chosen.length) return this.stash(chosen);
+    }
+
+    stashOptions() {
+      return [
+        { label: 'Guardar tudo', action: () => this.stash() },
+        { label: 'Guardar só o que está preparado', disabled: !this.data.status?.staged.length, action: () => this.stash('staged') },
+        { label: 'Escolher arquivos...', action: () => this.stashPick() },
+      ];
     }
 
     stashPop(ref) {
@@ -1631,6 +1713,7 @@
       return [
         !isCur && { label: b?.behind ? `Checkout e pull de ${name}` : `Checkout de ${name}`, action: () => this.checkout(name) },
         !isCur && cur && { label: `Merge de ${name} em ${cur}`, action: () => this.merge(name) },
+        !isCur && cur && { label: 'Merge com opções...', action: () => this.mergeOptions(name) },
         !isCur && cur && { label: `Rebase de ${cur} sobre ${name}`, action: () => this.rebase(name) },
         isCur && { label: 'Pull', action: () => this.pull() },
         isCur && { label: 'Push', action: () => this.push() },
@@ -1646,7 +1729,73 @@
         '-',
         { label: 'Copiar nome', action: () => this.copy(name) },
         !isCur && { label: 'Excluir branch', danger: true, action: () => this.deleteBranch(name) },
+        !isCur && b?.upstream && !b.gone && { label: `Excluir local e ${b.upstream}`, danger: true, action: () => this.deleteBranches([name], { remote: true }) },
       ];
+    }
+
+    // Janela com a lista de branches locais para excluir várias de uma vez.
+    async pickBranchesToDelete() {
+      const cur = this.data.head.branch;
+      const list = this.data.refs.local.filter((b) => !b.current);
+      if (!list.length) return toast('Não há outras branches locais.');
+      const merged = new Set(
+        cur
+          ? (await this.repo.run(['branch', '--merged', 'HEAD', '--format=%(refname:short)']))
+              .split('\n')
+              .map((x) => x.trim())
+              .filter(Boolean)
+          : []
+      );
+      const r = await form(
+        'Excluir branches',
+        [
+          { section: 'Branches locais', note: cur ? `"mesclada" = todos os commits dela já estão em ${cur}.` : '' },
+          ...list.map((b, i) => ({
+            name: 'b' + i,
+            type: 'checkbox',
+            label: `${b.name}${merged.has(b.name) ? '  · mesclada' : ''}${b.upstream ? `  · ${b.gone ? 'remota já removida' : b.upstream}` : ''}`,
+            value: false,
+          })),
+          { section: 'No servidor' },
+          { name: 'remote', type: 'checkbox', label: 'Excluir também a branch remota de cada uma (não dá para desfazer)', value: false },
+        ],
+        { ok: 'Excluir', danger: true, wide: true }
+      );
+      if (!r) return;
+      const names = list.filter((_, i) => r['b' + i]).map((b) => b.name);
+      if (names.length) return this.deleteBranches(names, { remote: r.remote, merged });
+    }
+
+    // Exclui as locais (o Desfazer recria) e, se pedido, as remotas de cada uma.
+    async deleteBranches(names, { remote = false, merged } = {}) {
+      const locals = names.map((n) => this.data.refs.local.find((b) => b.name === n)).filter(Boolean);
+      const remotes = remote ? locals.filter((b) => b.upstream && !b.gone) : [];
+      const unmerged = merged ? locals.filter((b) => !merged.has(b.name)).length : 0;
+      const msg = [
+        `Excluir ${locals.length === 1 ? `a branch "${locals[0].name}"` : `${locals.length} branches locais`}?`,
+        remotes.length ? `Também no servidor: ${remotes.map((b) => b.upstream).join(', ')} (isso não dá para desfazer).` : '',
+        unmerged ? `${unmerged} delas têm commits que não estão em ${this.data.head.branch}.` : '',
+        'As locais dá para recuperar pelo botão Desfazer enquanto o GitPolvo estiver aberto.',
+      ]
+        .filter(Boolean)
+        .join('\n');
+      if (!(await confirmBox('Excluir branches', msg, 'Excluir'))) return;
+      const shas = Object.fromEntries(locals.map((b) => [b.name, b.sha]));
+      const ok = await this.op('Excluir branches', async () => {
+        for (const b of remotes) {
+          const rm = this.pushRemote(b);
+          await this.repo.run(['push', rm, '--delete', b.upstream.slice(rm.length + 1)]);
+        }
+        await this.repo.run(['branch', '-D', ...locals.map((b) => b.name)]);
+      }, { success: locals.length === 1 ? `Branch ${locals[0].name} excluída` : `${locals.length} branches excluídas` });
+      if (ok)
+        this.record({
+          label: locals.length === 1 ? `exclusão da branch ${locals[0].name}` : `exclusão de ${locals.length} branches`,
+          undo: async () => {
+            for (const [n, sha] of Object.entries(shas)) await this.repo.run(['branch', n, sha]);
+          },
+          redo: () => this.repo.run(['branch', '-D', ...Object.keys(shas)]),
+        });
     }
 
     remoteBranchMenu(remote, name) {
@@ -1660,6 +1809,7 @@
             ? { label: local.behind ? `Checkout e pull de ${name}` : `Checkout de ${name}`, action: () => this.checkoutRemote(full) }
             : { label: `Checkout (criar local ${name})`, action: () => this.checkoutRemote(full) },
         cur && { label: `Merge de ${full} em ${cur}`, action: () => this.merge(full) },
+        cur && { label: 'Merge com opções...', action: () => this.mergeOptions(full) },
         cur && { label: `Rebase de ${cur} sobre ${full}`, action: () => this.rebase(full) },
         '-',
         cur && { label: `Comparar com ${cur}`, action: () => this.compareRefs(cur, full) },
@@ -1679,6 +1829,8 @@
           action: () => this.toggleHidden(`refs/remotes/${remote}/*`),
         },
         { label: 'Copiar URL', action: async () => this.copy((await this.repo.run(['remote', 'get-url', remote])).trim()) },
+        { label: 'Editar URL...', action: () => this.editRemoteUrl(remote) },
+        { label: 'Renomear...', action: () => this.renameRemote(remote) },
         '-',
         { label: 'Remover remoto', danger: true, action: () => this.removeRemote(remote) },
       ];
@@ -1691,7 +1843,29 @@
         { label: 'Copiar nome', action: () => this.copy(name) },
         '-',
         { label: 'Excluir tag local', danger: true, action: () => this.deleteTag(name) },
+        { label: 'Excluir tag no remoto...', danger: true, action: () => this.deleteRemoteTag(name) },
       ];
+    }
+
+    async deleteRemoteTag(name) {
+      const remote = await this.pickRemote();
+      if (!remote) return;
+      const r = await form(
+        'Excluir tag no remoto',
+        [{ name: 'local', type: 'checkbox', label: 'Excluir também a tag local', value: false }],
+        { ok: 'Excluir no servidor', danger: true, message: `Apagar a tag "${name}" em "${remote}"? Isso não dá para desfazer pelo GitPolvo.` }
+      );
+      if (!r) return;
+      return this.op('Excluir tag no remoto', async () => {
+        await this.repo.run(['push', remote, '--delete', `refs/tags/${name}`]);
+        if (r.local) await this.repo.run(['tag', '-d', name]);
+      }, { success: `Tag ${name} excluída em ${remote}` });
+    }
+
+    async pushAllTags() {
+      const remote = await this.pickRemote();
+      if (!remote) return;
+      return this.op('Push das tags', () => this.repo.run(['push', remote, '--tags']), { success: `Tags enviadas para ${remote}` });
     }
 
     stashMenu(s) {

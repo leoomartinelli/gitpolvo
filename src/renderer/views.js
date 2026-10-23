@@ -229,6 +229,22 @@
       },
     });
     const pullBtn = tbButton(TB.pull, ['Pull' + (localCur?.behind ? ` (${localCur.behind})` : ''), pullCaret], 'Pull', () => tab.pull());
+    const stashCaret = h('span', {
+      class: 'tb-caret',
+      title: 'Opções de stash',
+      html: TB.caret,
+      onclick: (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const r = e.currentTarget.getBoundingClientRect();
+        showMenu(r.left, r.bottom + 4, tab.stashOptions());
+      },
+    });
+    const stashBtn = tbButton(TB.stash, ['Stash', stashCaret], 'Guardar alterações no stash', () => tab.stash());
+    stashBtn.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, tab.stashOptions());
+    });
     // três grupos: identificação à esquerda, comandos centralizados, busca à direita
     const left = h('div', { class: 'tb-left' });
     const center = h('div', { class: 'tb-center' });
@@ -270,7 +286,7 @@
       tbButton(TB.fetch, 'Fetch', 'Fetch de todos os remotos (Ctrl+L)', () => tab.fetch()),
       h('div', { class: 'tb-sep' }),
       tbButton(TB.branch, 'Branch', 'Nova branch (Ctrl+B)', () => tab.createBranch()),
-      tbButton(TB.stash, 'Stash', 'Guardar alterações no stash', () => tab.stash()),
+      stashBtn,
       tbButton(TB.pop, 'Pop', 'Aplicar e remover o último stash', () => tab.stashPop()),
       h('div', { class: 'tb-sep' }),
       tbButton(TB.terminal, 'Terminal', 'Abrir terminal externo nesta pasta', () => window.polvo.terminal(tab.repo.root)),
@@ -504,6 +520,19 @@
       )
     );
 
+    const more = (title, items) =>
+      h(
+        'button',
+        {
+          class: 'icon-btn',
+          title,
+          onclick: (e) => {
+            e.stopPropagation();
+            showMenu(e.clientX, e.clientY, items());
+          },
+        },
+        '⋯'
+      );
     const add = (title, fn) =>
       h(
         'button',
@@ -521,7 +550,19 @@
     const sections = h(
       'div',
       { class: 'sections' },
-      section(tab, 'local', 'Local', local.length, localItems, add('Nova branch', () => tab.createBranch())),
+      section(
+        tab,
+        'local',
+        'Local',
+        local.length,
+        localItems,
+        h(
+          'span',
+          { class: 'sec-tools' },
+          more('Mais ações', () => [{ label: 'Excluir várias branches...', action: () => tab.pickBranchesToDelete() }]),
+          add('Nova branch', () => tab.createBranch())
+        )
+      ),
       section(
         tab,
         'remote',
@@ -546,7 +587,14 @@
           add('Adicionar remoto', () => tab.addRemote())
         )
       ),
-      section(tab, 'tags', 'Tags', tags.length, tagItems, add('Nova tag no HEAD', () => tab.createTag('HEAD'))),
+      section(
+        tab,
+        'tags',
+        'Tags',
+        tags.length,
+        tagItems,
+        h('span', { class: 'sec-tools' }, more('Mais ações', () => [{ label: 'Enviar todas as tags para o remoto', action: () => tab.pushAllTags() }]), add('Nova tag no HEAD', () => tab.createTag('HEAD')))
+      ),
       section(tab, 'stashes', 'Stashes', st.length, stashItems)
     );
     L.append(filter, sections);
@@ -1255,6 +1303,7 @@
                   showMenu(e.clientX, e.clientY, [
                     { label: 'Stage', action: () => tab.stage([f.path]) },
                     { label: 'Descartar alterações', danger: true, action: () => tab.discard(f) },
+                    { label: 'Guardar só este arquivo no stash', action: () => tab.stash([f.path]) },
                     '-',
                     { label: 'Ignorar (adicionar ao .gitignore)', action: () => tab.ignore(f.path) },
                     /\.[^./]+$/.test(f.path) && { label: `Ignorar todos os *${f.path.match(/\.[^./]+$/)[0]}`, action: () => tab.ignore('*' + f.path.match(/\.[^./]+$/)[0]) },
@@ -1300,6 +1349,8 @@
                   e.preventDefault();
                   showMenu(e.clientX, e.clientY, [
                     { label: 'Unstage', action: () => tab.unstage([f.path]) },
+                    { label: 'Guardar só este arquivo no stash', action: () => tab.stash([f.path]) },
+                    { label: 'Guardar todo o preparado no stash', action: () => tab.stash('staged') },
                     { label: 'Histórico do arquivo', action: () => tab.openHistory(f.path) },
                     f.status !== 'D' && { label: 'Blame', action: () => tab.openBlame(f.path) },
                     f.status !== 'D' && { label: 'Editar arquivo', action: () => tab.openEditor(f.path) },
