@@ -126,7 +126,8 @@ class Repo {
   }
 
   async stashes() {
-    const r = await this.raw(['stash', 'list', `--format=%H%x1f%P%x1f%gd%x1f%s`]);
+    // %gs é a mensagem do reflog, a que o "git stash list" mostra (muda ao renomear)
+    const r = await this.raw(['stash', 'list', `--format=%H%x1f%P%x1f%gd%x1f%gs`]);
     if (r.code !== 0) return [];
     return r.stdout
       .split('\n')
@@ -199,9 +200,10 @@ class Repo {
   }
 
   async commitDetails(sha) {
-    const fmt = ['%H', '%P', '%an', '%ae', '%at', '%cn', '%ce', '%ct', '%B'].join(FS);
+    // %G? só confere a assinatura deste commit (no log inteiro seria lento)
+    const fmt = ['%H', '%P', '%an', '%ae', '%at', '%cn', '%ce', '%ct', '%G?', '%GS', '%B'].join(FS);
     const meta = await this.run(['show', '-s', `--format=${fmt}`, sha]);
-    const [h, parents, an, ae, at, cn, ce, ct, body] = meta.split(FS);
+    const [h, parents, an, ae, at, cn, ce, ct, sig, signer, body] = meta.split(FS);
     const parentList = parents ? parents.split(' ') : [];
     const files = await this.commitFiles(sha, parentList);
     return {
@@ -213,6 +215,7 @@ class Repo {
       committer: cn,
       committerEmail: ce,
       commitDate: new Date(+ct * 1000),
+      signature: sig && sig !== 'N' ? { status: sig, signer } : null,
       message: body.trim(),
       files,
     };

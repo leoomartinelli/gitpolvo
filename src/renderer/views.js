@@ -55,6 +55,30 @@
     return { type: raw.slice(0, i), name: raw.slice(i + 1) };
   }
 
+  // Mouse sobre uma branch (etiqueta do grafo ou item da lista) destaca a linha dela.
+  function installBranchHover(tab, container) {
+    container.addEventListener('mouseover', (e) => {
+      const el = e.target.closest && e.target.closest('[data-ref]');
+      if (!el || tab.dragRef) {
+        if (tab.hoverRef) {
+          tab.hoverRef = null;
+          tab.clearHover();
+        }
+        return;
+      }
+      if (el.dataset.ref === tab.hoverRef) return;
+      tab.hoverRef = el.dataset.ref;
+      const { type, name } = parseRef(el.dataset.ref);
+      const refs = tab.data.refs || { local: [], remotes: {} };
+      const sha = type === 'local' ? refs.local.find((b) => b.name === name)?.sha : Object.values(refs.remotes).flat().find((b) => b.full === name)?.sha;
+      if (sha) tab.hoverBranch(sha);
+    });
+    container.addEventListener('mouseleave', () => {
+      tab.hoverRef = null;
+      tab.clearHover();
+    });
+  }
+
   function installRefDnD(tab, container) {
     let over = null;
     const clear = () => {
@@ -145,6 +169,8 @@
     tab.page.append(els.toolbar, els.pushAsk, els.banner, els.main);
     installRefDnD(tab, els.left);
     installRefDnD(tab, els.center);
+    installBranchHover(tab, els.left);
+    installBranchHover(tab, els.center);
     renderToolbar(tab);
   }
 
@@ -1047,10 +1073,11 @@
         const c = it.c;
         const hit = q && it.searchText.includes(q);
         const sel = tab.isSelected(c.sha);
+        const off = tab.hoverSet && !tab.hoverSet.has(c.sha);
         row = h(
           'div',
           {
-            class: 'g-row' + (sel ? ' selected' : '') + (q ? (hit ? ' match' : ' dimmed') : ''),
+            class: 'g-row' + (sel ? ' selected' : '') + (q ? (hit ? ' match' : ' dimmed') : '') + (off ? ' hover-off' : ''),
             style: { top: i * ROW_H + 'px' },
             onclick: (e) => tab.clickCommit(c.sha, e),
             oncontextmenu: (e) => {
@@ -1507,6 +1534,20 @@
     );
   }
 
+  // %G? do git: G boa, U boa mas chave sem confiança, X/Y expirada, R revogada, B ruim, E sem como conferir.
+  function signatureBadge(sig) {
+    const info = {
+      G: ['ok', '✓ Assinado', 'Assinatura válida'],
+      U: ['ok', '✓ Assinado', 'Assinatura válida, mas a chave não está marcada como confiável'],
+      X: ['warn', 'Assinado (expirada)', 'A assinatura expirou'],
+      Y: ['warn', 'Assinado (chave expirada)', 'A chave que assinou expirou'],
+      R: ['bad', 'Assinado (chave revogada)', 'A chave que assinou foi revogada'],
+      B: ['bad', '✕ Assinatura inválida', 'A assinatura não confere com o conteúdo do commit'],
+      E: ['warn', 'Assinado (não verificado)', 'Não foi possível conferir: a chave pública não está neste computador'],
+    }[sig.status] || ['warn', 'Assinado', ''];
+    return h('div', { class: 'sig-badge ' + info[0], title: info[2] + (sig.signer ? `\n${sig.signer}` : '') }, info[1], sig.signer ? h('span', { class: 'dim' }, ' · ' + sig.signer) : null);
+  }
+
   function renderCommit(tab, R, d) {
     const [subject, ...body] = d.message.split('\n');
     const bodyText = body.join('\n').trim();
@@ -1588,7 +1629,8 @@
           { class: 'grow' },
           h('div', { class: 'author-name', title: d.email }, d.author),
           h('div', { class: 'dim small' }, 'autoria ', h('span', { class: 'strong' }, when(d.date))),
-          sameCommitter ? null : h('div', { class: 'dim small' }, 'commit por ', d.committer, ' ', h('span', { class: 'strong' }, when(d.commitDate)))
+          sameCommitter ? null : h('div', { class: 'dim small' }, 'commit por ', d.committer, ' ', h('span', { class: 'strong' }, when(d.commitDate))),
+          d.signature ? signatureBadge(d.signature) : null
         ),
         h(
           'div',
@@ -1718,12 +1760,50 @@
 
   // Corpo do diff (unificado ou lado a lado). Com `pick`, as linhas alteradas
   // ficam clicáveis para stage/unstage/descarte por linha.
-  function diffBody(files, { pick, hunkActions, path } = {}) {
+  const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|svg|avif)$/i;
+  const MIME = { jpg: 'jpeg', jpeg: 'jpeg', svg: 'svg+xml', ico: 'x-icon' };
+
+  // Antes e depois lado a lado. sides: { old, new } com { spec } (objeto do git)
+  // ou { file } (arquivo do diretório); ausente = o arquivo não existia daquele lado.
+  function imageDiff(tab, path, sides) {
+    const ext = path.split('.').pop().toLowerCase();
+    const mime = 'image/' + (MIME[ext] || ext);
+    const box = h('div', { class: 'image-diff' });
+    const panel = (label, side, cls) => {
+      const info = h('div', { class: 'dim small' }, side ? 'carregando...' : 'não existia');
+      const frame = h('div', { class: 'image-frame ' + cls });
+      if (side) {
+        const load = side.spec ? window.polvo.blobBase64(tab.repo.root, side.spec) : window.polvo.readBase64(tab.repo.root, side.file);
+        load.then((b64) => {
+          if (!b64) return (info.textContent = 'não foi possível ler');
+          const img = h('img', { src: `data:${mime};base64,${b64}`, alt: label });
+          img.addEventListener('load', () => (info.textContent = `${img.naturalWidth} × ${img.naturalHeight} px · ${(Math.round(((b64.length * 3) / 4 / 1024) * 10) / 10).toLocaleString('pt-BR')} KB`));
+          frame.append(img);
+        });
+      }
+      return h('div', { class: 'image-side' }, h('div', { class: 'image-label' }, label), frame, info);
+    };
+    box.append(panel('Antes', sides.old, 'old'), panel('Depois', sides.new, 'new'));
+    return box;
+  }
+
+  // Lados da imagem conforme o tipo de diff aberto.
+  function imageSides(v, f) {
+    const created = f.header.some((l) => l.startsWith('new file'));
+    const deleted = f.header.some((l) => l.startsWith('deleted file'));
+    const from = (f.header.find((l) => l.startsWith('rename from ')) || '').slice(12) || v.file;
+    if (v.kind === 'untracked') return { new: { file: v.file } };
+    if (v.kind === 'unstaged') return { old: created ? null : { spec: ':' + v.file }, new: deleted ? null : { file: v.file } };
+    if (v.kind === 'staged') return { old: created ? null : { spec: 'HEAD:' + from }, new: deleted ? null : { spec: ':' + v.file } };
+    return { old: created || !v.parents?.length ? null : { spec: `${v.parents[0]}:${from}` }, new: deleted ? null : { spec: `${v.sha}:${v.file}` } };
+  }
+
+  function diffBody(files, { pick, hunkActions, path, image } = {}) {
     const body = h('div', { class: 'diff-body' + (diffPrefs.split ? ' split' : '') });
     const lang = HL.langOf(path);
     for (const f of files) {
       if (f.binary) {
-        body.append(h('div', { class: 'empty' }, 'Arquivo binário — diff não exibido.'));
+        body.append(image && IMAGE_EXT.test(path || '') ? image(f) : h('div', { class: 'empty' }, 'Arquivo binário — diff não exibido.'));
         continue;
       }
       for (const hk of f.hunks) {
@@ -1863,7 +1943,7 @@
       if (v.kind === 'staged') return h('button', { class: 'btn small', onclick: () => tab.unstageHunk(f, hk) }, 'Unstage hunk');
       return null;
     };
-    const body = diffBody(files, { pick, hunkActions, path: v.file });
+    const body = diffBody(files, { pick, hunkActions, path: v.file, image: (f) => imageDiff(tab, v.file, imageSides(v, f)) });
     C.append(body);
     body.scrollTop = prevScroll;
   }
@@ -2040,7 +2120,12 @@
     C.append(list);
     list.scrollTop = prevList;
     const selEntry = v.entries.find((x) => x.sha === v.sel);
-    const body = v.diffLoading ? h('div', { class: 'diff-body' }, h('div', { class: 'empty' }, 'Carregando...')) : diffBody(v.files, { path: selEntry?.path || v.file });
+    const body = v.diffLoading
+      ? h('div', { class: 'diff-body' }, h('div', { class: 'empty' }, 'Carregando...'))
+      : diffBody(v.files, {
+          path: selEntry?.path || v.file,
+          image: (f) => imageDiff(tab, selEntry.path, imageSides({ kind: 'commit', file: selEntry.path, sha: selEntry.sha, parents: selEntry.parents }, f)),
+        });
     if (!v.diffLoading && !v.files.length) body.append(h('div', { class: 'empty' }, 'Sem diferenças de conteúdo neste commit.'));
     C.append(body);
     body.scrollTop = prevDiff;

@@ -549,6 +549,10 @@ function buildMenu() {
         { type: 'separator' },
         { label: 'Stage em tudo', accelerator: 'CmdOrCtrl+Shift+S', click: cmd('repo:stageAll') },
         { label: 'Unstage em tudo', accelerator: 'CmdOrCtrl+Shift+U', click: cmd('repo:unstageAll') },
+        { type: 'separator' },
+        { label: 'Aplicar patch...', click: cmd('repo:applyPatch') },
+        { label: 'Novo worktree...', click: cmd('repo:worktree') },
+        { type: 'separator' },
         { label: 'Atualizar', accelerator: 'F5', click: cmd('repo:refresh') },
       ],
     },
@@ -816,6 +820,42 @@ ipcMain.handle('recent:remove', (_e, repoPath) => {
 ipcMain.handle('dialog:pickDir', async (_e, title) => {
   const r = await dialog.showOpenDialog(win, { title, properties: ['openDirectory', 'createDirectory'] });
   return r.canceled ? null : r.filePaths[0];
+});
+
+// Salvar/abrir arquivos de texto escolhidos pelo usuário (patches).
+ipcMain.handle('dialog:saveText', async (_e, title, defaultPath, content) => {
+  const r = await dialog.showSaveDialog(win, { title, defaultPath, filters: [{ name: 'Patch', extensions: ['patch', 'diff'] }] });
+  if (r.canceled || !r.filePath) return null;
+  fs.writeFileSync(r.filePath, content);
+  return r.filePath;
+});
+
+ipcMain.handle('dialog:openText', async (_e, title) => {
+  const r = await dialog.showOpenDialog(win, { title, properties: ['openFile'], filters: [{ name: 'Patch', extensions: ['patch', 'diff', 'eml', 'txt'] }, { name: 'Todos', extensions: ['*'] }] });
+  if (r.canceled || !r.filePaths[0]) return null;
+  return { path: r.filePaths[0], content: fs.readFileSync(r.filePaths[0], 'utf8') };
+});
+
+// Conteúdo binário em base64 (para mostrar imagens no diff): de um objeto do
+// git ("<rev>:<caminho>", ":<caminho>" = índice) ou de um arquivo do repositório.
+ipcMain.handle('git:blobBase64', (_e, cwd, spec) =>
+  new Promise((resolve) => {
+    const child = spawn('git', ['cat-file', 'blob', spec], { cwd, env: askpassEnv() });
+    const out = [];
+    child.stdout.on('data', (d) => out.push(d));
+    child.on('error', () => resolve(null));
+    child.on('close', (code) => resolve(code === 0 ? Buffer.concat(out).toString('base64') : null));
+  })
+);
+
+ipcMain.handle('fs:readBase64', (_e, repo, rel) => {
+  const full = path.resolve(repo, rel);
+  if (!full.startsWith(path.resolve(repo) + path.sep)) return null;
+  try {
+    return fs.readFileSync(full).toString('base64');
+  } catch {
+    return null;
+  }
 });
 
 ipcMain.handle('repo:init', async (_e, dir) => {

@@ -13,6 +13,14 @@
 
 # Novidades
 
+## Imagens no diff, patches e commits assinados
+
+- Imagens (PNG, JPG, GIF, SVG, WebP...) aparecem lado a lado no diff, antes e depois, com o tamanho de cada uma
+- Passar o mouse numa branch (no grafo ou na lista) destaca os commits da linha dela
+- Commits assinados (GPG ou SSH) mostram um selo no painel de detalhes, dizendo se a assinatura confere
+- "Salvar como patch..." no menu do commit (ou de vários marcados) e "Aplicar patch..." no menu Repositório
+- Stash: renomear e criar uma branch a partir dele, pelo botão direito
+
 ## Worktrees, submódulos, perfis e merge com opções
 
 - Worktrees: seção nova na esquerda para abrir outra branch numa pasta separada, cada uma na sua aba ("+" ou "Abrir num worktree novo..." no menu da branch)

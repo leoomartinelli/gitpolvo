@@ -502,6 +502,27 @@
       this.loadDetails(stash.sha);
     }
 
+    // Passar o mouse numa branch destaca os commits da linha dela no grafo: do
+    // topo descendo pelo primeiro pai enquanto continua na mesma coluna.
+    hoverBranch(sha) {
+      const set = new Set();
+      let i = this.shaIndex?.get(sha);
+      const col = i != null ? this.layout.rows[i].col : null;
+      while (i != null && this.layout.rows[i].col === col && !set.has(this.commits[i].sha)) {
+        set.add(this.commits[i].sha);
+        const p = this.commits[i].parents[0];
+        i = p ? this.shaIndex.get(p) : null;
+      }
+      this.hoverSet = set.size ? set : null;
+      V.renderGraphRows(this);
+    }
+
+    clearHover() {
+      if (!this.hoverSet) return;
+      this.hoverSet = null;
+      V.renderGraphRows(this);
+    }
+
     isSelected(sha) {
       if (this.multi.length) return this.multi.includes(sha);
       return !this.compare && this.selected === sha;
@@ -1256,6 +1277,35 @@
       }, { undoHead: 'keep', undoLabel: `revert de ${shas.length} commits` });
     }
 
+    // ---------- patches ----------
+    // list: commits do mais novo para o mais antigo (como multiCommits)
+    async savePatch(list) {
+      const shas = list.map((c) => c.sha).reverse();
+      const range = shas.length === 1 ? ['-1', shas[0]] : [`${shas[0]}^..${shas[shas.length - 1]}`];
+      // commits soltos (não seguidos) viram um patch cada, concatenados em ordem
+      const seguidos = shas.length === 1 || (await this.repo.raw(['rev-list', '--count', ...range])).stdout.trim() === String(shas.length);
+      const out = seguidos
+        ? await this.repo.run(['format-patch', '--stdout', ...range])
+        : (await Promise.all(shas.map((sha) => this.repo.run(['format-patch', '--stdout', '-1', sha])))).join('');
+      const name = shas.length === 1 ? `${list[0].subject.replace(/[^\w\-]+/g, '-').slice(0, 50).replace(/-+$/, '')}.patch` : `${shas.length}-commits.patch`;
+      const saved = await polvo.saveText('Salvar patch', name, out);
+      if (saved) toast(`Patch salvo em ${saved}`);
+    }
+
+    // Patch de "git format-patch" vira commits (git am); um diff comum só altera os arquivos.
+    async applyPatchFile() {
+      const f = await polvo.openText('Aplicar patch');
+      if (!f) return;
+      const isMail = /^From [0-9a-f]{40} /m.test(f.content);
+      const ok = await this.op(isMail ? 'Aplicar patch (commits)' : 'Aplicar patch', async () => {
+        const r = await this.repo.raw(isMail ? ['am', '--3way'] : ['apply', '--3way', '--whitespace=nowarn'], f.content);
+        if (r.code === 0) return;
+        if (isMail) await this.repo.raw(['am', '--abort']);
+        throw new Error((r.stderr || r.stdout).trim());
+      }, { success: isMail ? 'Commits do patch aplicados' : 'Patch aplicado no diretório de trabalho', undoHead: isMail ? 'keep' : undefined, undoLabel: 'aplicar patch' });
+      if (ok && !isMail) this.select('WIP');
+    }
+
     // ---------- rebase interativo ----------
     // Reaplica os commits depois de `base` conforme o plano montado na janela:
     // o git lê a lista pronta (sequence.editor copia o arquivo) e os rewords
@@ -1994,10 +2044,30 @@
       return this.op('Push das tags', () => this.repo.run(['push', remote, '--tags']), { success: `Tags enviadas para ${remote}` });
     }
 
+    // O git não renomeia stash: sai da lista e volta (no topo) com a mensagem nova.
+    async renameStash(s) {
+      const msg = await prompt('Renomear stash', 'Mensagem', s.msg.replace(/^On [^:]+: /, ''), { ok: 'Renomear' });
+      if (!msg || msg === s.msg) return;
+      return this.op('Renomear stash', async () => {
+        await this.repo.run(['stash', 'drop', s.ref]);
+        await this.repo.run(['stash', 'store', '-m', msg, s.sha]);
+      }, { success: 'Stash renomeado (agora é o primeiro da lista)' });
+    }
+
+    // Branch nova no commit em que o stash foi feito, com as alterações aplicadas.
+    async branchFromStash(s) {
+      if (this.hasDirtyWorktree()) return toast('Faça commit ou stash das alterações atuais antes.', 'error');
+      const name = await prompt('Branch a partir do stash', 'Nome da branch nova', '', { ok: 'Criar', message: 'A branch começa no commit em que o stash foi feito, com as alterações dele aplicadas. O stash sai da lista.' });
+      if (!name) return;
+      return this.op('Branch a partir do stash', () => this.repo.run(['stash', 'branch', name.replace(/\s+/g, '-'), s.ref]), { success: `Branch ${name} criada com as alterações do stash` });
+    }
+
     stashMenu(s) {
       return [
         { label: 'Aplicar', action: () => this.stashApply(s.ref) },
         { label: 'Aplicar e remover (pop)', action: () => this.stashPop(s.ref) },
+        { label: 'Criar branch a partir dele...', action: () => this.branchFromStash(s) },
+        { label: 'Renomear...', action: () => this.renameStash(s) },
         '-',
         { label: 'Excluir', danger: true, action: () => this.stashDrop(s.ref) },
       ];
@@ -2013,6 +2083,7 @@
         { label: `Reverter ${n} commits`, action: () => this.revertMany(list) },
         '-',
         { label: 'Copiar SHAs', action: () => this.copy(list.map((c) => c.sha).join('\n')) },
+        { label: `Salvar ${n} commits como patch...`, action: () => this.savePatch(list) },
         { label: 'Limpar seleção', action: () => this.clearMulti() },
       ];
     }
@@ -2033,6 +2104,7 @@
         c.sha !== this.headSha && { label: 'Comparar com o HEAD', action: () => this.compareRefs(c.sha, 'HEAD', c.sha.slice(0, 7), 'HEAD') },
         { label: 'Copiar SHA', action: () => this.copy(c.sha) },
         { label: 'Copiar mensagem', action: () => this.copy(c.subject) },
+        { label: 'Salvar como patch...', action: () => this.savePatch([c]) },
         ...this.webMenu(c.sha),
       ];
     }
@@ -2647,6 +2719,7 @@
           ['Abrir terminal', 'repo:terminal'],
           ['Abrir pasta', 'repo:reveal'],
           ['Novo worktree...', 'repo:worktree'],
+          ['Aplicar patch...', 'repo:applyPatch'],
           ['Atualizar submódulos', 'repo:submodules'],
           ['Atualizar', 'repo:refresh'],
           ['Mostrar/ocultar painel esquerdo', 'view:toggleLeft'],
@@ -2767,6 +2840,8 @@
           return polvo.reveal(t.repo.root);
         case 'repo:worktree':
           return t.createWorktree();
+        case 'repo:applyPatch':
+          return t.applyPatchFile();
         case 'repo:submodules':
           return t.updateSubmodules();
         case 'repo:refresh':
