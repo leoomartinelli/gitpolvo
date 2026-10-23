@@ -13,13 +13,19 @@
 
 # Novidades
 
-## Imagens no diff, patches e commits assinados
+## Imagens no diff, patches, hooks e histórico de operações
 
 - Imagens (PNG, JPG, GIF, SVG, WebP...) aparecem lado a lado no diff, antes e depois, com o tamanho de cada uma
 - Passar o mouse numa branch (no grafo ou na lista) destaca os commits da linha dela
 - Commits assinados (GPG ou SSH) mostram um selo no painel de detalhes, dizendo se a assinatura confere
 - "Salvar como patch..." no menu do commit (ou de vários marcados) e "Aplicar patch..." no menu Repositório
 - Stash: renomear e criar uma branch a partir dele, pelo botão direito
+- Fixar branches favoritas no topo da lista (botão direito → "Fixar no topo da lista")
+- O painel de commit mostra os hooks do repositório (ex.: pre-commit) e permite pular nesse commit
+- Modelo de mensagem de commit: "Modelo" no painel de commit, já respeitando o commit.template do Git
+- Ferramenta externa de merge e de diff (meld, kdiff3...), escolhida nas Preferências
+- Exibir → Histórico de operações: o que o GitPolvo fez e os comandos do Git de cada operação, com os erros
+- As notificações agora aparecem embaixo, no centro, e não cobrem mais o botão de commit
 
 ## Worktrees, submódulos, perfis e merge com opções
 

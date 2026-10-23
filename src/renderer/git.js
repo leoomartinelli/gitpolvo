@@ -21,8 +21,12 @@ class Repo {
     this.name = root.split('/').filter(Boolean).pop();
   }
 
+  // onCommand, quando definido, recebe cada comando executado (histórico de operações)
   async raw(args, input) {
-    return window.polvo.git(this.root, args, input);
+    const t0 = Date.now();
+    const r = await window.polvo.git(this.root, args, input);
+    if (this.onCommand) this.onCommand({ args, code: r.code, ms: Date.now() - t0, stderr: r.stderr });
+    return r;
   }
 
   async run(args, input) {

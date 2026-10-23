@@ -144,6 +144,7 @@ window.addEventListener('blur', hideMenu);
 const modalRoot = document.getElementById('modal-root');
 
 function openModal(build, { onClose } = {}) {
+  hideMenu();
   const back = h('div', { class: 'modal-back' });
   const close = (val) => {
     back.remove();

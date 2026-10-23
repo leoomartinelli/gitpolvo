@@ -565,6 +565,8 @@ function buildMenu() {
         { label: 'Alternar tema claro/escuro', click: cmd('view:theme') },
         { label: 'Atalhos de teclado', accelerator: 'CmdOrCtrl+/', click: cmd('view:shortcuts') },
         { type: 'separator' },
+        { label: 'Histórico de operações', click: cmd('repo:opLog') },
+        { type: 'separator' },
         { role: 'zoomIn', label: 'Aumentar zoom', accelerator: 'CmdOrCtrl+=' },
         { role: 'zoomOut', label: 'Diminuir zoom' },
         { role: 'resetZoom', label: 'Zoom padrão' },
@@ -847,6 +849,45 @@ ipcMain.handle('git:blobBase64', (_e, cwd, spec) =>
     child.on('close', (code) => resolve(code === 0 ? Buffer.concat(out).toString('base64') : null));
   })
 );
+
+// Hooks ativos do repositório: arquivos executáveis na pasta de hooks
+// (core.hooksPath, como o do husky, ou .git/hooks), fora os .sample.
+ipcMain.handle('repo:hooks', async (_e, repo) => {
+  const r = await runGit(repo, ['rev-parse', '--git-path', 'hooks']);
+  if (r.code !== 0) return [];
+  const dir = path.resolve(repo, r.stdout.trim());
+  try {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((d) => d.isFile() && !d.name.endsWith('.sample') && !d.name.startsWith('.'))
+      .filter((d) => {
+        if (IS_WIN) return true;
+        try {
+          fs.accessSync(path.join(dir, d.name), fs.constants.X_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      })
+      .map((d) => d.name)
+      .sort();
+  } catch {
+    return [];
+  }
+});
+
+// Texto do modelo de mensagem (git config commit.template), que costuma ficar
+// fora do repositório (ex.: ~/.gitmessage).
+ipcMain.handle('repo:commitTemplate', async (_e, repo) => {
+  const r = await runGit(repo, ['config', '--path', 'commit.template']);
+  const file = r.code === 0 ? r.stdout.trim() : '';
+  if (!file) return null;
+  try {
+    return fs.readFileSync(path.resolve(repo, file), 'utf8');
+  } catch {
+    return null;
+  }
+});
 
 ipcMain.handle('fs:readBase64', (_e, repo, rel) => {
   const full = path.resolve(repo, rel);

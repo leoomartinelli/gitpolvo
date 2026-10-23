@@ -27,6 +27,7 @@
       this.logLimit = LOG_PAGE;
       this.filters = null; // branches escondidas/solo no grafo, lidas das configurações
       this.editDrafts = {}; // edições não salvas do editor embutido, por arquivo
+      this.opLog = []; // operações feitas nesta sessão, com os comandos git de cada uma
       this.undoStack = []; // ações que o botão Desfazer sabe reverter (só nesta sessão)
       this.redoStack = [];
       this.view = { type: 'graph' };
@@ -59,8 +60,9 @@
       try {
         const r = this.repo;
         if (!this.filters) this.filters = await this.loadFilters();
+        if (!this.pinned) this.pinned = ((await polvo.settings.get()).pinnedBranches || {})[this.repo.root] || [];
         const log = r.log({ limit: this.logLimit, hidden: this.filters.hidden, solo: this.filters.solo });
-        const [head, refs, stashes, status, commits, state, submodules, worktrees, identity] = await Promise.all([
+        const [head, refs, stashes, status, commits, state, submodules, worktrees, identity, hooks, template] = await Promise.all([
           r.head(),
           r.refs(),
           r.stashes(),
@@ -70,16 +72,18 @@
           r.submodules(),
           r.worktrees(),
           r.identity(),
+          polvo.hooks(r.root),
+          polvo.commitTemplate(r.root),
         ]);
         const headSha = (await r.raw(['rev-parse', 'HEAD'])).stdout.trim();
         // nada mudou desde a última leitura: só confere o diff aberto, sem redesenhar
-        const signature = JSON.stringify([head, refs, stashes, status, state, headSha, submodules, worktrees, identity, commits.map((c) => c.sha + c.refs.map((x) => x.name).join())]);
+        const signature = JSON.stringify([head, refs, stashes, status, state, headSha, submodules, worktrees, identity, hooks, template, commits.map((c) => c.sha + c.refs.map((x) => x.name).join())]);
         if (signature === this.signature) {
           if (this.view.type === 'diff') this.reloadDiff();
           return;
         }
         this.signature = signature;
-        this.data = { head, refs, stashes, status, state, submodules, worktrees, identity };
+        this.data = { head, refs, stashes, status, state, submodules, worktrees, identity, hooks, template };
         if (state !== 'clean' && !this.commitDraft.summary) await this.prefillSequencerMessage();
         this.commits = commits;
         this.layout = layoutGraph(commits);
@@ -346,18 +350,27 @@
     // estava, se a operação moveu o HEAD e terminou sem conflito.
     async op(label, fn, { success, quiet, undoHead, undoLabel } = {}) {
       this.setBusy(label + '...');
+      const entry = { label, at: new Date(), commands: [], ok: false, error: '' };
+      this.repo.onCommand = (c) => entry.commands.push(c);
       try {
         const before = undoHead ? await this.headState() : null;
         await fn();
+        entry.ok = true;
         if (success) toast(success);
         if (before) await this.recordHeadMove(undoLabel || label, before, undoHead);
         return true;
       } catch (e) {
+        entry.error = e.message;
         if (!quiet) toast(`${label} falhou:\n${e.message}`, 'error');
         return false;
       } finally {
+        this.repo.onCommand = null;
+        this.opLog.unshift(entry);
+        this.opLog.length = Math.min(this.opLog.length, 200);
         this.busy = null;
         await this.refresh();
+        // se nada mudou o refresh não redesenha, e o polvo de "trabalhando" ficaria na barra
+        V.renderToolbar(this);
       }
     }
 
@@ -936,6 +949,7 @@
       if (!d.summary.trim()) return;
       const args = ['commit', '-q', '-F', '-'];
       if (d.amend) args.push('--amend');
+      if (d.noVerify) args.push('--no-verify');
       const ok = await this.op('Commit', () => this.repo.run(args, msg), { undoHead: 'soft', undoLabel: `${d.amend ? 'amend' : 'commit'} "${d.summary.trim()}"` });
       if (ok) {
         this.commitDraft = { summary: '', description: '', amend: false };
@@ -1605,6 +1619,52 @@
       ]);
     }
 
+    // ---------- favoritas, ferramentas externas e modelo de commit ----------
+    async togglePin(name) {
+      const i = this.pinned.indexOf(name);
+      if (i >= 0) this.pinned.splice(i, 1);
+      else this.pinned.push(name);
+      const s = await polvo.settings.get();
+      await polvo.settings.set({ pinnedBranches: { ...(s.pinnedBranches || {}), [this.repo.root]: this.pinned } });
+      V.renderLeft(this);
+    }
+
+    // Ferramenta de merge do git (merge.tool): o GitPolvo espera ela fechar.
+    mergeTool(file) {
+      return this.op('Ferramenta de merge', async () => {
+        const r = await this.repo.raw(['-c', 'mergetool.keepBackup=false', 'mergetool', '--no-prompt', '--', file]);
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || 'A ferramenta de merge terminou com erro. Configure uma nas Preferências.');
+        if (this.view.type === 'conflict') this.view = { type: 'graph' };
+      });
+    }
+
+    // Ferramenta de diff do git (diff.tool) para o diff aberto; não mexe no repositório.
+    async diffTool(v) {
+      const range = v.kind === 'staged' ? ['--cached'] : v.kind === 'commit' ? (v.parents?.length ? [v.parents[0], v.sha] : [`${v.sha}^!`]) : [];
+      toast('Abrindo a ferramenta de diff...');
+      const r = await this.repo.raw(['difftool', '--no-prompt', ...range, '--', v.file]);
+      if (r.code !== 0) toast(`Ferramenta de diff falhou:\n${(r.stderr || r.stdout).trim() || 'Configure uma nas Preferências.'}`, 'error');
+    }
+
+    // Modelo deste repositório: fica em .git/polvo-commit-template e vira o commit.template local.
+    async editTemplate() {
+      const text = await V.messageEditor('Modelo de mensagem de commit', this.data.template || '', {
+        ok: 'Salvar modelo',
+        message: 'Texto que já vem no campo de mensagem a cada commit neste repositório. Linhas começando com # não entram no commit. Deixe vazio para não usar modelo.',
+        allowEmpty: true,
+      });
+      if (text == null) return;
+      const gitDir = await this.repo.gitDir();
+      const file = gitDir + '/polvo-commit-template';
+      await polvo.writeFile(gitDir, 'polvo-commit-template', text ? text + '\n' : '');
+      if (text) await this.repo.run(['config', '--local', 'commit.template', file]);
+      else await this.repo.raw(['config', '--local', '--unset', 'commit.template']);
+      const d = this.commitDraft;
+      if (d.templateUsed && d.summary === d.templateSummary && d.description === d.templateDescription) this.commitDraft = { summary: '', description: '', amend: false };
+      toast(text ? 'Modelo salvo' : 'Modelo removido');
+      this.refresh();
+    }
+
     // ---------- remotos ----------
     async pickRemote() {
       const remotes = await this.repo.remoteNames();
@@ -1901,6 +1961,7 @@
         !isCur && cur && { label: `Comparar com ${cur}`, action: () => this.compareRefs(cur, name) },
         { label: 'Comparar com...', action: () => this.pickCompare(name) },
         !isCur && { label: 'Abrir num worktree novo...', action: () => this.createWorktree(name) },
+        { label: this.pinned?.includes(name) ? 'Desafixar do topo' : 'Fixar no topo da lista', action: () => this.togglePin(name) },
         ...this.refFilterMenu('refs/heads/' + name, { canHide: !isCur }),
         '-',
         { label: 'Copiar nome', action: () => this.copy(name) },
@@ -2605,7 +2666,13 @@
       const cwd = t ? t.repo.root : '.';
       const cfg = async (args) => ((await polvo.git(cwd, ['config', ...args])).stdout || '').trim();
       const s = (this.settings = await polvo.settings.get());
-      const [gName, gEmail, defBranch] = await Promise.all([cfg(['--global', 'user.name']), cfg(['--global', 'user.email']), cfg(['--global', 'init.defaultBranch'])]);
+      const [gName, gEmail, defBranch, mergeTool, diffTool] = await Promise.all([
+        cfg(['--global', 'user.name']),
+        cfg(['--global', 'user.email']),
+        cfg(['--global', 'init.defaultBranch']),
+        cfg(['--global', 'merge.tool']),
+        cfg(['--global', 'diff.tool']),
+      ]);
       const [lName, lEmail] = t ? await Promise.all([cfg(['--local', 'user.name']), cfg(['--local', 'user.email'])]) : ['', ''];
       const fields = [
         { section: 'Identidade no Git (todos os repositórios)' },
@@ -2637,6 +2704,9 @@
         { name: 'avatars', label: 'Mostrar fotos de perfil dos autores', type: 'checkbox', value: UI.avatars.enabled },
         { section: 'Editor externo', note: 'Comando usado em "Abrir no editor". Vazio: VS Code (code), se houver, senão o programa padrão do sistema. Use {arquivo} para escolher onde vai o caminho.' },
         { name: 'editorCmd', label: 'Comando', value: s.editorCmd || '', placeholder: 'code   ·   subl   ·   phpstorm   ·   gedit {arquivo}' },
+        { section: 'Ferramentas de merge e diff', note: 'Programa usado em "Abrir na ferramenta de merge/diff" (o mesmo do git mergetool/difftool). Vazio: o git escolhe.' },
+        { name: 'mergeTool', label: 'Merge', value: mergeTool, placeholder: 'meld · kdiff3 · vimdiff · bc' },
+        { name: 'diffTool', label: 'Diff', value: diffTool, placeholder: 'meld · kdiff3 · vimdiff · bc' },
         { section: 'Novos repositórios' },
         { name: 'defBranch', label: 'Nome da branch inicial', value: defBranch, placeholder: 'main' },
       ];
@@ -2651,6 +2721,8 @@
       await setCfg('--global', 'user.name', r.gName, gName);
       await setCfg('--global', 'user.email', r.gEmail, gEmail);
       await setCfg('--global', 'init.defaultBranch', r.defBranch, defBranch);
+      await setCfg('--global', 'merge.tool', r.mergeTool, mergeTool);
+      await setCfg('--global', 'diff.tool', r.diffTool, diffTool);
       if (t) {
         await setCfg('--local', 'user.name', r.lName, lName);
         await setCfg('--local', 'user.email', r.lEmail, lEmail);
@@ -2720,6 +2792,8 @@
           ['Abrir pasta', 'repo:reveal'],
           ['Novo worktree...', 'repo:worktree'],
           ['Aplicar patch...', 'repo:applyPatch'],
+          ['Histórico de operações', 'repo:opLog'],
+          ['Modelo de mensagem de commit...', 'repo:template'],
           ['Atualizar submódulos', 'repo:submodules'],
           ['Atualizar', 'repo:refresh'],
           ['Mostrar/ocultar painel esquerdo', 'view:toggleLeft'],
@@ -2842,6 +2916,10 @@
           return t.createWorktree();
         case 'repo:applyPatch':
           return t.applyPatchFile();
+        case 'repo:opLog':
+          return V.opLogModal(t);
+        case 'repo:template':
+          return t.editTemplate();
         case 'repo:submodules':
           return t.updateSubmodules();
         case 'repo:refresh':

@@ -427,7 +427,15 @@
     const { refs, stashes } = tab.data;
     if (!refs) return L.append(filter);
 
-    const local = refs.local.filter((b) => match(b.name));
+    const pinned = tab.pinned || [];
+    // fixadas primeiro, na ordem em que foram fixadas; depois as outras em ordem alfabética
+    const local = refs.local
+      .filter((b) => match(b.name))
+      .sort((a, b) => {
+        const pa = pinned.indexOf(a.name);
+        const pb = pinned.indexOf(b.name);
+        return (pa < 0 ? 1e9 : pa) - (pb < 0 ? 1e9 : pb);
+      });
     const wts = tab.data.worktrees || [];
     const elsewhere = new Map(wts.filter((w) => w.branch && w.path !== tab.repo.root).map((w) => [w.branch, w.path]));
     const localItems = local.map((b) =>
@@ -447,6 +455,7 @@
         },
         h('span', {}, b.current ? '✔' : '⑂'),
         h('span', { class: 'name' }, b.name),
+        pinned.includes(b.name) ? h('span', { class: 'pin-mark', title: 'Fixada no topo (botão direito para desafixar)' }, '★') : null,
         h(
           'span',
           { class: 'track' },
@@ -1330,6 +1339,7 @@
                   e.preventDefault();
                   showMenu(e.clientX, e.clientY, [
                     { label: 'Resolver...', action: () => tab.openConflict(f.path) },
+                    { label: 'Abrir na ferramenta de merge', action: () => tab.mergeTool(f.path) },
                     { label: 'Usar a minha versão (ours)', action: () => tab.resolveWith(f.path, 'ours') },
                     { label: 'Usar a versão deles (theirs)', action: () => tab.resolveWith(f.path, 'theirs') },
                     { label: 'Marcar como resolvido', action: () => tab.stage([f.path]) },
@@ -1447,6 +1457,14 @@
     );
 
     const draft = tab.commitDraft;
+    // modelo de mensagem (commit.template): entra uma vez, enquanto o campo está vazio
+    if (tab.data.template && !draft.templateUsed && !draft.summary && !draft.description) {
+      const lines = tab.data.template.split('\n').filter((l) => !l.startsWith('#'));
+      const first = lines.findIndex((l) => l.trim());
+      draft.summary = first >= 0 ? lines[first].trim() : '';
+      draft.description = first >= 0 ? lines.slice(first + 1).join('\n').trim() : '';
+      Object.assign(draft, { templateUsed: true, templateSummary: draft.summary, templateDescription: draft.description });
+    }
     const summary = h('input', { placeholder: 'Resumo do commit', spellcheck: 'true', 'data-field': 'summary' });
     summary.value = draft.summary;
     const counter = h('span', { class: 'counter dim' });
@@ -1506,14 +1524,35 @@
       id.local ? h('span', { class: 'solo-mark' }, 'só aqui') : null,
       ' ▾'
     );
+    const COMMIT_HOOKS = ['pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit'];
+    const hooks = (tab.data.hooks || []).filter((x) => COMMIT_HOOKS.includes(x));
+    let hooksRow = null;
+    if (hooks.length) {
+      const skip = h('input', { type: 'checkbox' });
+      skip.checked = !!draft.noVerify;
+      skip.addEventListener('change', () => (draft.noVerify = skip.checked));
+      hooksRow = h(
+        'label',
+        { class: 'row dim small hooks-row', title: 'Scripts do repositório que o git roda no commit (ex.: lint, testes, formato da mensagem)' },
+        skip,
+        `Pular hooks (${hooks.join(', ')})`
+      );
+    }
     const box = h(
       'div',
       { class: 'commit-box' },
-      h('div', { class: 'row' }, h('strong', { class: 'grow' }, 'Mensagem do commit'), counter),
+      h(
+        'div',
+        { class: 'row' },
+        h('strong', { class: 'grow' }, 'Mensagem do commit'),
+        h('button', { class: 'link-btn', title: 'Texto que já vem no campo a cada commit', onclick: () => tab.editTemplate() }, tab.data.template ? 'Modelo ✓' : 'Modelo'),
+        counter
+      ),
       who,
       summary,
       desc,
       h('label', { class: 'row dim' }, amend, 'Corrigir commit anterior (amend)'),
+      hooksRow,
       commitBtn
     );
     R.append(scrollBox, box);
@@ -1906,6 +1945,7 @@
                   v.kind !== 'untracked' && v.kind !== 'staged' && { label: v.kind === 'commit' ? 'Blame neste commit' : 'Blame', action: () => tab.openBlame(v.file, v.kind === 'commit' ? v.sha : undefined) },
                   v.kind !== 'commit' && !deleted && { label: 'Editar arquivo', action: () => tab.openEditor(v.file) },
                   !deleted && { label: 'Abrir no editor externo', action: () => tab.openInEditor(v.file) },
+                  v.kind !== 'untracked' && { label: 'Abrir na ferramenta de diff', action: () => tab.diffTool(v) },
                 ]);
               },
             },
@@ -2131,6 +2171,62 @@
     body.scrollTop = prevDiff;
   }
 
+  // Operações feitas nesta sessão, da mais recente para a mais antiga, com os
+  // comandos git de cada uma e a saída de erro (para entender o que deu errado).
+  function opLogModal(tab) {
+    const quote = (a) => (/[\s"'$]/.test(a) ? `'${a.replace(/'/g, `'\\''`)}'` : a);
+    const cmdText = (c) => 'git ' + c.args.map(quote).join(' ');
+    const asText = () =>
+      tab.opLog
+        .map((e) =>
+          [
+            `[${e.at.toLocaleString('pt-BR')}] ${e.label} — ${e.ok ? 'ok' : 'falhou'}`,
+            ...e.commands.map((c) => `  $ ${cmdText(c)}  (código ${c.code}, ${c.ms} ms)${c.code && c.stderr ? '\n    ' + c.stderr.trim().replace(/\n/g, '\n    ') : ''}`),
+            e.error ? '  erro: ' + e.error : '',
+          ]
+            .filter(Boolean)
+            .join('\n')
+        )
+        .join('\n\n');
+    openModal((close) =>
+      h(
+        'div',
+        { class: 'modal wide oplog' },
+        h('h2', {}, 'Histórico de operações'),
+        h('div', { class: 'msg dim' }, `O que o GitPolvo fez em ${tab.repo.name} desde que a aba foi aberta, com os comandos do git de cada operação.`),
+        h(
+          'div',
+          { class: 'oplog-list' },
+          tab.opLog.length
+            ? tab.opLog.map((e) =>
+                h(
+                  'details',
+                  { class: 'oplog-item' + (e.ok ? '' : ' failed'), open: !e.ok || null },
+                  h('summary', {}, h('span', { class: 'oplog-status' }, e.ok ? '✓' : '✕'), h('span', { class: 'grow' }, e.label), h('span', { class: 'dim small' }, e.at.toLocaleTimeString('pt-BR'))),
+                  e.commands.map((c) =>
+                    h(
+                      'div',
+                      { class: 'oplog-cmd' + (c.code ? ' failed' : '') },
+                      h('code', {}, cmdText(c)),
+                      h('span', { class: 'dim small' }, ` ${c.code ? 'código ' + c.code + ' · ' : ''}${c.ms} ms`),
+                      c.code && c.stderr ? h('pre', {}, c.stderr.trim()) : null
+                    )
+                  ),
+                  e.error && !e.commands.some((c) => c.code) ? h('pre', {}, e.error) : null
+                )
+              )
+            : h('div', { class: 'dim' }, 'Nenhuma operação ainda nesta aba.')
+        ),
+        h(
+          'div',
+          { class: 'actions' },
+          h('button', { class: 'btn', disabled: !tab.opLog.length || null, onclick: () => (navigator.clipboard.writeText(asText()), window.UI.toast('Histórico copiado')) }, 'Copiar tudo'),
+          h('button', { class: 'btn primary', onclick: () => close(null) }, 'Fechar')
+        )
+      )
+    );
+  }
+
   // Lista editável de perfis { label, name, email }; devolve a lista ou null.
   function profilesEditor(initial) {
     const list = initial.map((p) => ({ ...p }));
@@ -2185,14 +2281,14 @@
   }
 
   // Janela simples com um campo de mensagem (usada no squash).
-  function messageEditor(title, text, { ok = 'OK', message } = {}) {
+  function messageEditor(title, text, { ok = 'OK', message, allowEmpty = false } = {}) {
     return new Promise((resolve) => {
       openModal(
         (close) => {
           const area = h('textarea', { class: 'msg-editor', spellcheck: 'true', rows: 10 });
           area.value = text;
-          const okBtn = h('button', { class: 'btn primary', onclick: () => area.value.trim() && close(area.value.trim()) }, ok);
-          area.addEventListener('input', () => (okBtn.disabled = !area.value.trim()));
+          const okBtn = h('button', { class: 'btn primary', onclick: () => (allowEmpty || area.value.trim()) && close(area.value.trim()) }, ok);
+          if (!allowEmpty) area.addEventListener('input', () => (okBtn.disabled = !area.value.trim()));
           area.addEventListener('keydown', (e) => e.key === 'Enter' && (e.ctrlKey || e.metaKey) && okBtn.click());
           return h(
             'div',
@@ -2395,6 +2491,7 @@
         h('span', { class: 'path' }, '⚠ ', v.file),
         h('span', { class: 'dim' }, `${done} de ${conflicts.length} resolvido(s)`),
         done < conflicts.length ? h('button', { class: 'btn small', onclick: next }, 'Próximo conflito') : null,
+        h('button', { class: 'btn small', title: 'Abrir no programa de merge configurado (Preferências)', onclick: () => tab.mergeTool(v.file) }, 'Ferramenta externa'),
         h('button', { class: 'btn small', onclick: () => tab.resolveWith(v.file, 'ours') }, 'Arquivo inteiro: meu'),
         h('button', { class: 'btn small', onclick: () => tab.resolveWith(v.file, 'theirs') }, 'Arquivo inteiro: deles'),
         h('button', { class: 'icon-btn', title: 'Fechar (Esc)', onclick: () => tab.closeView() }, '✕')
@@ -2541,5 +2638,5 @@
     });
   }
 
-  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, renderHistory, renderBlame, renderEditor, rebaseEditor, messageEditor, profilesEditor, setDiffPrefs, diffPrefs, ROW_H };
+  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, renderHistory, renderBlame, renderEditor, rebaseEditor, messageEditor, profilesEditor, opLogModal, setDiffPrefs, diffPrefs, ROW_H };
 })();

@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld('polvo', {
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   readFile: (repo, rel) => ipcRenderer.invoke('fs:readFile', repo, rel),
   readBase64: (repo, rel) => ipcRenderer.invoke('fs:readBase64', repo, rel),
+  hooks: (repo) => ipcRenderer.invoke('repo:hooks', repo),
+  commitTemplate: (repo) => ipcRenderer.invoke('repo:commitTemplate', repo),
   blobBase64: (cwd, spec) => ipcRenderer.invoke('git:blobBase64', cwd, spec),
   saveText: (title, defaultPath, content) => ipcRenderer.invoke('dialog:saveText', title, defaultPath, content),
   openText: (title) => ipcRenderer.invoke('dialog:openText', title),
