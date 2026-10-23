@@ -3306,3 +3306,136 @@ html[data-theme='light'] {
 .welcome-hint {
   margin-top: 14px;
 }
+
+/* ---------- GitHub: CI, pull requests e issues ---------- */
+.ci-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  flex: none;
+  vertical-align: middle;
+}
+
+.ci-success { background: var(--add-fg); }
+.ci-failure { background: var(--danger); }
+.ci-pending { background: var(--warn); animation: ci-pulse 1.2s ease-in-out infinite; }
+.ci-cancelled { background: var(--text-dim); }
+
+@keyframes ci-pulse {
+  50% { opacity: 0.35; }
+}
+
+.ci-list {
+  margin-bottom: 12px;
+}
+
+.ci-list h4 {
+  margin-top: 0;
+}
+
+.ci-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.ci-item:hover {
+  background: var(--bg-hover);
+}
+
+.ci-item .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.gh-num {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-family: var(--mono);
+}
+
+.gh-scroll {
+  flex: 1;
+  overflow: auto;
+  padding: 14px 18px;
+  user-select: text;
+}
+
+.gh-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.gh-state {
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  color: #fff;
+  background: var(--text-dim);
+}
+
+.gh-state.open { background: #238636; }
+.gh-state.draft { background: #6e7681; }
+.gh-state.merged { background: #8957e5; }
+.gh-state.closed { background: #da3633; }
+
+.gh-label {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.gh-comment {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+
+.gh-comment-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.gh-body {
+  padding: 8px 12px;
+}
+
+.gh-review {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.gh-review.approved { color: var(--add-fg); }
+.gh-review.changes_requested { color: var(--danger); }
+
+.gh-files-title {
+  margin: 18px 0 6px;
+}
+
+.gh-file-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  margin-top: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.gh-scroll .diff-body {
+  flex: none;
+  overflow: visible;
+}

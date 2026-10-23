@@ -37,6 +37,15 @@ contextBridge.exposeInMainWorld('polvo', {
   },
   avatar: (email, ctx) => ipcRenderer.invoke('avatar:get', email, ctx),
   clearAvatars: () => ipcRenderer.invoke('avatar:clear'),
+  github: {
+    request: (method, path, body) => ipcRenderer.invoke('github:request', method, path, body),
+    account: () => ipcRenderer.invoke('github:account'),
+    setToken: (token) => ipcRenderer.invoke('github:setToken', token),
+  },
+  ssh: {
+    publicKeys: () => ipcRenderer.invoke('ssh:publicKeys'),
+    keygen: (comment, passphrase) => ipcRenderer.invoke('ssh:keygen', comment, passphrase),
+  },
   onRepoChanged: (fn) => ipcRenderer.on('repo:changed', (_e, p) => fn(p)),
   onWindowFocus: (fn) => ipcRenderer.on('window:focus', () => fn()),
   onMenu: (fn) => ipcRenderer.on('menu:command', (_e, name) => fn(name)),

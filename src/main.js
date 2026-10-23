@@ -152,6 +152,7 @@ function loadPersistedCredentials() {
   }
   if (!map) return;
   for (const [k, v] of Object.entries(map)) {
+    if (k === GITHUB_TOKEN_KEY) continue; // token da API, não é senha de git/ssh
     askpass.cache.set(k, v);
     askpass.persisted.add(k);
     if (k.startsWith('ssh-key:')) trySshAddKey(k);
@@ -648,12 +649,27 @@ function avatarStore() {
 
 // Token do GitHub: variável de ambiente ou o login já feito no GitHub CLI (`gh`).
 // Usado só para falar com api.github.com (repositórios privados e limite maior).
+// Ordem: token colado nas Preferências (no cofre criptografado), variável de
+// ambiente e, por fim, o login do GitHub CLI (gh auth token).
+const GITHUB_TOKEN_KEY = 'github-token';
 let githubTokenPromise = null;
+let githubTokenSource = null;
+
+function savedGithubToken() {
+  try {
+    return (readPersistedMap() || {})[GITHUB_TOKEN_KEY] || null;
+  } catch {
+    return null;
+  }
+}
 
 function githubToken() {
   if (!githubTokenPromise) {
     githubTokenPromise = (async () => {
-      if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) return process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+      const saved = savedGithubToken();
+      if (saved) return (githubTokenSource = 'saved'), saved;
+      if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) return (githubTokenSource = 'env'), process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+      githubTokenSource = 'gh';
       // o app aberto pelo menu pode não ter ~/.local/bin no PATH
       const candidates = ['gh', path.join(os.homedir(), '.local/bin/gh'), '/usr/local/bin/gh', '/opt/homebrew/bin/gh', '/usr/bin/gh', '/snap/bin/gh'];
       for (const bin of candidates) {
@@ -670,11 +686,94 @@ function githubToken() {
         });
         if (token) return token;
       }
+      githubTokenSource = null;
       return null;
     })();
   }
   return githubTokenPromise;
 }
+
+// Pedido à API do GitHub em nome do usuário. O token nunca sai do processo principal.
+async function githubRequest(method, urlPath, body) {
+  if (typeof urlPath !== 'string' || !urlPath.startsWith('/')) return { status: 0, data: null, error: 'caminho inválido' };
+  const token = await githubToken();
+  const headers = { 'User-Agent': 'GitPolvo', Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (body != null) headers['Content-Type'] = 'application/json';
+  try {
+    const r = await electronNet.fetch('https://api.github.com' + urlPath, { method, headers, body: body != null ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(15000) });
+    const text = await r.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+    return { status: r.status, data, authed: !!token, error: r.ok ? null : (data && data.message) || `HTTP ${r.status}` };
+  } catch (e) {
+    return { status: 0, data: null, authed: !!token, error: e.message };
+  }
+}
+
+ipcMain.handle('github:request', (_e, method, urlPath, body) => githubRequest(String(method || 'GET').toUpperCase(), urlPath, body));
+
+// Chaves SSH públicas em ~/.ssh (para cadastrar no GitHub).
+ipcMain.handle('ssh:publicKeys', () => {
+  const dir = path.join(os.homedir(), '.ssh');
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.pub'))
+      .map((f) => ({ path: path.join(dir, f), key: fs.readFileSync(path.join(dir, f), 'utf8').trim() }))
+      .filter((k) => /^(ssh-|ecdsa-|sk-)/.test(k.key));
+  } catch {
+    return [];
+  }
+});
+
+// Gera uma chave ed25519 nova. Nunca sobrescreve: se o arquivo existe, recusa.
+ipcMain.handle('ssh:keygen', async (_e, comment, passphrase) => {
+  const dir = path.join(os.homedir(), '.ssh');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  let file = path.join(dir, 'id_ed25519');
+  // já existe a padrão: cria outra ao lado (o ssh não usa sozinho, então avisamos)
+  for (let i = 1; fs.existsSync(file) || fs.existsSync(file + '.pub'); i++) file = path.join(dir, `id_ed25519_gitpolvo${i > 1 ? i : ''}`);
+  const r = await new Promise((resolve) => {
+    const child = spawn('ssh-keygen', ['-q', '-t', 'ed25519', '-C', String(comment || ''), '-N', String(passphrase || ''), '-f', file], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let err = '';
+    child.stderr.on('data', (d) => (err += d));
+    child.on('error', (e) => resolve({ code: -1, err: e.message }));
+    child.on('close', (code) => resolve({ code, err }));
+  });
+  if (r.code !== 0) return { ok: false, error: r.err.trim() || 'ssh-keygen falhou (está instalado?)' };
+  return { ok: true, path: file, key: fs.readFileSync(file + '.pub', 'utf8').trim(), isDefault: path.basename(file) === 'id_ed25519' };
+});
+
+ipcMain.handle('github:account', async () => {
+  const token = await githubToken();
+  if (!token) return { login: null, source: null };
+  const r = await githubRequest('GET', '/user');
+  return r.status === 200 ? { login: r.data.login, name: r.data.name, avatar: r.data.avatar_url, source: githubTokenSource, scopes: null } : { login: null, source: githubTokenSource, error: r.error };
+});
+
+// Token colado pelo usuário: confere na API antes de guardar. Vazio = esquecer.
+ipcMain.handle('github:setToken', async (_e, token) => {
+  token = String(token || '').trim();
+  if (!token) {
+    updatePersistedKey(GITHUB_TOKEN_KEY, '');
+    githubTokenPromise = null;
+    return { ok: true };
+  }
+  const r = await electronNet
+    .fetch('https://api.github.com/user', { headers: { 'User-Agent': 'GitPolvo', Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) })
+    .catch((e) => ({ ok: false, status: 0, statusText: e.message }));
+  if (!r.ok) return { ok: false, error: r.status === 401 ? 'Token inválido ou expirado.' : `O GitHub respondeu ${r.status || r.statusText}.` };
+  const user = await r.json();
+  if (!updatePersistedKey(GITHUB_TOKEN_KEY, token)) return { ok: false, error: 'Não foi possível guardar o token com segurança neste computador (cofre do sistema indisponível).' };
+  githubTokenPromise = null;
+  ownIdentityPromise = null;
+  return { ok: true, login: user.login };
+});
 
 async function githubApi(urlPath) {
   const headers = { 'User-Agent': 'GitPolvo', Accept: 'application/vnd.github+json' };

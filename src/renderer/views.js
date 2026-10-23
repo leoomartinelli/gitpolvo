@@ -630,6 +630,37 @@
         )
       ),
     ].filter(Boolean);
+    const ghList = (list, kind) => {
+      if (!tab.github) return [];
+      if (list == null) return [h('div', { class: 'ref-item dim' }, h('span', { class: 'name' }, 'carregando...'))];
+      if (list.error) return [h('div', { class: 'ref-item lfs-warn', title: list.error }, h('span', {}, '⚠'), h('span', { class: 'name' }, list.error))];
+      return list
+        .filter((x) => match(`#${x.number} ${x.title}`))
+        .map((x) =>
+          h(
+            'div',
+            {
+              class: 'ref-item gh-item' + (tab.view.number === x.number && tab.view.type === kind ? ' current' : ''),
+              title: `#${x.number} ${x.title}\n${x.user?.login || ''}${kind === 'pr' ? `\n${x.head.label} → ${x.base.ref}` : ''}`,
+              onclick: () => (kind === 'pr' ? tab.openPr(x.number) : tab.openIssue(x.number)),
+              oncontextmenu: (e) => {
+                e.preventDefault();
+                showMenu(e.clientX, e.clientY, [
+                  { label: 'Abrir no GitHub', action: () => window.polvo.openExternal(x.html_url) },
+                  kind === 'pr' && { label: 'Fazer checkout', action: () => tab.checkoutPr(x) },
+                  kind === 'issue' && { label: 'Criar branch para esta issue', action: () => tab.branchForIssue(x) },
+                  { label: 'Copiar link', action: () => tab.copy(x.html_url) },
+                ]);
+              },
+            },
+            h('span', { class: 'gh-num' }, '#' + x.number),
+            h('span', { class: 'name' }, x.title),
+            x.draft ? h('span', { class: 'track' }, 'rascunho') : null
+          )
+        );
+    };
+    const prItems = ghList(tab.prs, 'pr');
+    const issueItems = ghList(tab.issues, 'issue');
     const add = (title, fn) =>
       h(
         'button',
@@ -686,9 +717,40 @@
               },
             }
           ),
-          add('Adicionar remoto', () => tab.addRemote())
+          h(
+            'button',
+            {
+              class: 'icon-btn',
+              title: 'Adicionar remoto',
+              onclick: (e) => {
+                e.stopPropagation();
+                showMenu(e.clientX, e.clientY, tab.addRemoteMenu());
+              },
+            },
+            '+'
+          )
         )
       ),
+      tab.github
+        ? section(
+            tab,
+            'prs',
+            'Pull requests',
+            Array.isArray(tab.prs) ? tab.prs.length : 0,
+            prItems,
+            h('span', { class: 'sec-tools' }, more('Mais ações', () => [{ label: 'Atualizar lista', action: () => tab.refreshGithub(true) }]), add('Criar pull request da branch atual', () => tab.createPr()))
+          )
+        : null,
+      tab.github
+        ? section(
+            tab,
+            'issues',
+            'Issues',
+            Array.isArray(tab.issues) ? tab.issues.length : 0,
+            issueItems,
+            h('span', { class: 'sec-tools' }, more('Mais ações', () => [{ label: 'Atualizar lista', action: () => tab.refreshGithub(true) }]), add('Nova issue', () => tab.createIssue()))
+          )
+        : null,
       section(
         tab,
         'tags',
@@ -1152,6 +1214,7 @@
           h(
             'div',
             { class: 'col-msg', title: c.bodyLine ? `${c.subject}\n\n${c.bodyLine}` : c.subject, style: { borderLeftColor: laneColor(it.g.col) } },
+            ciDot(tab.ci.get(c.sha)),
             c.subject,
             c.bodyLine ? h('span', { class: 'msg-body' }, c.bodyLine) : null
           ),
@@ -1167,6 +1230,33 @@
       inner.append(h('div', { class: 'g-row more-row', style: { top: items.length * ROW_H + 'px' } }, 'Carregando mais commits...'));
       tab.loadMoreCommits();
     }
+  }
+
+  const CI_LABEL = { success: 'CI passou', failure: 'CI falhou', pending: 'CI rodando', cancelled: 'CI cancelado' };
+
+  function ciDot(ci) {
+    if (!ci || !ci.state) return null;
+    const detail = ci.checks.map((c) => `${c.state === 'success' ? '✓' : c.state === 'failure' ? '✕' : '•'} ${c.name}`).join('\n');
+    return h('span', { class: 'ci-dot ci-' + ci.state, title: `${CI_LABEL[ci.state]}\n${detail}` });
+  }
+
+  // Lista das checagens (Actions e status) com link para cada uma.
+  function ciList(ci) {
+    if (!ci || !ci.checks?.length) return null;
+    return h(
+      'div',
+      { class: 'ci-list' },
+      h('h4', {}, ciDot(ci), `Checagens (${CI_LABEL[ci.state]})`),
+      ci.checks.map((c) =>
+        h(
+          'div',
+          { class: 'ci-item', title: c.url || '', onclick: () => c.url && window.polvo.openExternal(c.url) },
+          h('span', { class: 'ci-dot ci-' + c.state }),
+          h('span', { class: 'grow ellip' }, c.name),
+          h('span', { class: 'dim small' }, { success: 'ok', failure: 'falhou', pending: 'rodando', cancelled: 'cancelado' }[c.state] || c.state)
+        )
+      )
+    );
   }
 
   function scrollToRow(tab, index) {
@@ -1638,6 +1728,14 @@
     return h('div', { class: 'sig-badge ' + info[0], title: info[2] + (sig.signer ? `\n${sig.signer}` : '') }, info[1], sig.signer ? h('span', { class: 'dim' }, ' · ' + sig.signer) : null);
   }
 
+  // "#123" vira link para a issue/PR (só em repositórios do GitHub).
+  function issueLinks(tab, text) {
+    if (!tab.github) return text;
+    return text.split(/(#\d+\b)/).map((part) =>
+      /^#\d+$/.test(part) ? h('span', { class: 'link issue-link', title: 'Abrir no GitPolvo', onclick: () => tab.openRef(+part.slice(1)) }, part) : part
+    );
+  }
+
   function renderCommit(tab, R, d) {
     const [subject, ...body] = d.message.split('\n');
     const bodyText = body.join('\n').trim();
@@ -1708,7 +1806,8 @@
       fillList();
     });
     box.append(
-      h('div', { class: 'detail-msg' }, h('div', { class: 'subject' }, subject), bodyText ? h('div', { class: 'body' }, bodyText) : null),
+      h('div', { class: 'detail-msg' }, h('div', { class: 'subject' }, issueLinks(tab, subject)), bodyText ? h('div', { class: 'body' }, issueLinks(tab, bodyText)) : null),
+      tab.selectedIsStash ? null : ciList(tab.ci.get(d.sha)),
       h('div', { class: 'grab' }),
       h(
         'div',
@@ -2037,6 +2136,146 @@
     const body = diffBody(files, { pick, hunkActions, path: v.file, image: (f) => imageDiff(tab, v.file, imageSides(v, f)) });
     C.append(body);
     body.scrollTop = prevScroll;
+  }
+
+  // ---------- GitHub: pull request e issue ----------
+  function ghHead(tab, title, extra) {
+    return h('div', { class: 'diff-head' }, h('span', { class: 'path' }, title), h('div', { class: 'head-tools' }, extra), h('button', { class: 'icon-btn', title: 'Fechar (Esc)', onclick: () => tab.closeView() }, '✕'));
+  }
+
+  function ghComment(tab, c, kind) {
+    return h(
+      'div',
+      { class: 'gh-comment' },
+      h(
+        'div',
+        { class: 'gh-comment-head' },
+        avatar(c.user?.login || '?', '', false, null),
+        h('strong', {}, c.user?.login || ''),
+        kind ? h('span', { class: 'gh-review ' + kind.toLowerCase() }, { APPROVED: 'aprovou', CHANGES_REQUESTED: 'pediu mudanças', COMMENTED: 'comentou', DISMISSED: 'revisão descartada' }[kind] || kind) : null,
+        h('span', { class: 'dim small' }, relDate(new Date(c.created_at || c.submitted_at)))
+      ),
+      c.body ? h('div', { class: 'gh-body' }, window.UI.renderMarkdown(c.body)) : null
+    );
+  }
+
+  // Arquivos do PR no mesmo diff do app (a API manda só os trechos).
+  function prFilesDiff(files) {
+    const box = h('div', {});
+    for (const f of files) {
+      const text = f.patch ? `diff --git a/${f.filename} b/${f.filename}\n--- a/${f.filename}\n+++ b/${f.filename}\n${f.patch}\n` : '';
+      const parsed = text ? window.GitLayer.parseDiff(text) : [];
+      box.append(
+        h('div', { class: 'gh-file-head' }, statusIcon({ added: 'A', removed: 'D', renamed: 'R' }[f.status] || 'M'), h('span', { class: 'mono' }, f.filename), h('span', { class: 'dim small' }, `+${f.additions} −${f.deletions}`)),
+        parsed.length ? diffBody(parsed, { path: f.filename }) : h('div', { class: 'empty small' }, f.status === 'removed' ? 'Arquivo removido.' : 'Diff não disponível (binário ou grande demais).')
+      );
+    }
+    return box;
+  }
+
+  function renderPr(tab) {
+    const C = tab.els.center;
+    const v = tab.view;
+    const prev = C.querySelector('.gh-scroll')?.scrollTop || 0;
+    C.innerHTML = '';
+    if (v.loading) return C.append(ghHead(tab, `Pull request #${v.number}`), h('div', { class: 'empty' }, 'Carregando...'));
+    if (v.error) return C.append(ghHead(tab, `Pull request #${v.number}`), h('div', { class: 'empty' }, v.error));
+    const pr = v.pr;
+    const open = pr.state === 'open';
+    const state = pr.merged ? ['merged', 'juntado'] : open ? (pr.draft ? ['draft', 'rascunho'] : ['open', 'aberto']) : ['closed', 'fechado'];
+    C.append(
+      ghHead(tab, `#${pr.number} ${pr.title}`, [
+        h('button', { class: 'btn small', onclick: () => tab.checkoutPr(pr) }, 'Checkout'),
+        open ? h('button', { class: 'btn small', onclick: () => tab.reviewPr(pr, 'APPROVE') }, 'Aprovar') : null,
+        open ? h('button', { class: 'btn small', onclick: () => tab.reviewPr(pr, 'REQUEST_CHANGES') }, 'Pedir mudanças') : null,
+        h('button', { class: 'btn small', onclick: () => tab.commentIssue(pr.number) }, 'Comentar'),
+        open && !pr.draft ? h('button', { class: 'btn small primary', disabled: pr.mergeable === false || null, title: pr.mergeable === false ? 'Há conflitos com a branch de destino' : '', onclick: () => tab.mergePr(pr) }, 'Merge...') : null,
+        h('button', { class: 'btn small', onclick: () => window.polvo.openExternal(pr.html_url) }, 'GitHub ↗'),
+      ])
+    );
+    const reviews = (v.reviews || []).filter((r) => r.state !== 'PENDING');
+    const timeline = [...(v.comments || []).map((c) => ({ c, at: c.created_at })), ...reviews.map((r) => ({ c: r, kind: r.state, at: r.submitted_at }))].sort((a, b) => new Date(a.at) - new Date(b.at));
+    const scroll = h(
+      'div',
+      { class: 'gh-scroll' },
+      h(
+        'div',
+        { class: 'gh-meta' },
+        h('span', { class: 'gh-state ' + state[0] }, state[1]),
+        h('span', {}, h('strong', {}, pr.user.login), ' quer juntar ', h('span', { class: 'mono' }, pr.head.label), ' em ', h('span', { class: 'mono' }, pr.base.ref)),
+        h('span', { class: 'dim small' }, `${pr.commits} commit(s) · ${pr.changed_files} arquivo(s) · +${pr.additions} −${pr.deletions}`),
+        pr.mergeable === false ? h('span', { class: 'lfs-warn small' }, 'tem conflitos') : null
+      ),
+      ciList(tab.ci.get(pr.head.sha)),
+      ghComment(tab, { user: pr.user, body: pr.body || '_Sem descrição._', created_at: pr.created_at }),
+      timeline.map((x) => ghComment(tab, x.c, x.kind)),
+      h('h4', { class: 'gh-files-title' }, `Arquivos alterados (${v.files.length})`),
+      prFilesDiff(v.files)
+    );
+    C.append(scroll);
+    scroll.scrollTop = prev;
+  }
+
+  function renderIssue(tab) {
+    const C = tab.els.center;
+    const v = tab.view;
+    C.innerHTML = '';
+    if (v.loading) return C.append(ghHead(tab, `Issue #${v.number}`), h('div', { class: 'empty' }, 'Carregando...'));
+    if (v.error) return C.append(ghHead(tab, `Issue #${v.number}`), h('div', { class: 'empty' }, v.error));
+    const is = v.issue;
+    const open = is.state === 'open';
+    C.append(
+      ghHead(tab, `#${is.number} ${is.title}`, [
+        h('button', { class: 'btn small', title: 'Branch com o número da issue no nome', onclick: () => tab.branchForIssue(is) }, 'Criar branch'),
+        h('button', { class: 'btn small', onclick: () => tab.commentIssue(is.number) }, 'Comentar'),
+        h('button', { class: 'btn small', onclick: () => tab.setIssueState(is, open ? 'closed' : 'open') }, open ? 'Fechar issue' : 'Reabrir'),
+        h('button', { class: 'btn small', onclick: () => window.polvo.openExternal(is.html_url) }, 'GitHub ↗'),
+      ]),
+      h(
+        'div',
+        { class: 'gh-scroll' },
+        h(
+          'div',
+          { class: 'gh-meta' },
+          h('span', { class: 'gh-state ' + (open ? 'open' : 'closed') }, open ? 'aberta' : 'fechada'),
+          (is.labels || []).map((l) => h('span', { class: 'gh-label', style: { borderColor: '#' + l.color } }, l.name)),
+          is.assignees?.length ? h('span', { class: 'dim small' }, 'com ', is.assignees.map((a) => a.login).join(', ')) : null
+        ),
+        ghComment(tab, { user: is.user, body: is.body || '_Sem descrição._', created_at: is.created_at }),
+        (v.comments || []).map((c) => ghComment(tab, c))
+      )
+    );
+  }
+
+  // Título, descrição e (para PR) a branch de destino e rascunho.
+  function prEditor({ title, bases = [], base, head, issue = false }) {
+    return new Promise((resolve) => {
+      openModal(
+        (close) => {
+          const t = h('input', { placeholder: 'Título', spellcheck: 'true' });
+          t.value = title || '';
+          const body = h('textarea', { class: 'msg-editor', rows: 8, placeholder: 'Descrição (markdown)', spellcheck: 'true' });
+          const baseSel = issue ? null : h('select', {}, bases.map((b) => h('option', { value: b, selected: b === base }, b)));
+          const draft = h('input', { type: 'checkbox' });
+          const ok = h(
+            'button',
+            { class: 'btn primary', onclick: () => t.value.trim() && close({ title: t.value.trim(), body: body.value, base: baseSel?.value, draft: draft.checked }) },
+            issue ? 'Criar issue' : 'Criar pull request'
+          );
+          return h(
+            'div',
+            { class: 'modal wide' },
+            h('h2', {}, issue ? 'Nova issue' : `Pull request de ${head}`),
+            issue ? null : h('label', {}, 'Juntar em', baseSel),
+            h('label', {}, 'Título', t),
+            h('label', {}, 'Descrição', body),
+            issue ? null : h('label', { class: 'check' }, draft, 'Abrir como rascunho'),
+            h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => close(null) }, 'Cancelar'), ok)
+          );
+        },
+        { onClose: resolve }
+      );
+    });
   }
 
   // ---------- editor embutido ----------
@@ -2689,5 +2928,5 @@
     });
   }
 
-  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, renderHistory, renderBlame, renderEditor, rebaseEditor, messageEditor, profilesEditor, opLogModal, setDiffPrefs, diffPrefs, ROW_H };
+  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, renderHistory, renderBlame, renderEditor, rebaseEditor, messageEditor, profilesEditor, opLogModal, renderPr, renderIssue, prEditor, setDiffPrefs, diffPrefs, ROW_H };
 })();

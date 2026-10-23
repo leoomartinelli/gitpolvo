@@ -13,6 +13,16 @@
 
 # Novidades
 
+## GitHub dentro do GitPolvo: pull requests, issues e CI
+
+- Seções "Pull requests" e "Issues" na esquerda: abra, comente, aprove, peça mudanças, faça merge, crie PR da branch atual e crie issues sem sair do app
+- Status do CI (GitHub Actions) com um pontinho ao lado dos commits e a lista de checagens nos detalhes
+- "#123" na mensagem do commit abre a issue ou o PR no próprio app
+- Clonar escolhendo da lista de repositórios da sua conta
+- Adicionar remoto de um fork ou do repositório original, pelo "+" do Remoto
+- Chave SSH: gerar uma nova ou cadastrar a existente no GitHub (paleta → "Chave SSH para o GitHub")
+- Conta do GitHub nas Preferências: usa o login do GitHub CLI (gh) ou um token colado ali, guardado criptografado
+
 ## Imagens no diff, Git Flow, workspaces e histórico de operações
 
 - Imagens (PNG, JPG, GIF, SVG, WebP...) aparecem lado a lado no diff, antes e depois, com o tamanho de cada uma

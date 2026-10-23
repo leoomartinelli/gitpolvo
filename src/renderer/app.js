@@ -28,6 +28,9 @@
       this.filters = null; // branches escondidas/solo no grafo, lidas das configurações
       this.editDrafts = {}; // edições não salvas do editor embutido, por arquivo
       this.opLog = []; // operações feitas nesta sessão, com os comandos git de cada uma
+      this.ci = new Map(); // sha -> { state, checks, at } do GitHub (status do CI)
+      this.prs = null; // pull requests abertos (null = ainda não lidos)
+      this.issues = null;
       this.undoStack = []; // ações que o botão Desfazer sabe reverter (só nesta sessão)
       this.redoStack = [];
       this.view = { type: 'graph' };
@@ -103,6 +106,7 @@
         this.render();
         if (this.view.type === 'diff') this.reloadDiff();
         if (this.compare) this.loadCompare();
+        if (this.github) this.refreshGithub();
       } catch (e) {
         toast('Erro ao ler o repositório:\n' + e.message, 'error');
       } finally {
@@ -337,6 +341,8 @@
       else if (this.view.type === 'history') V.renderHistory(this);
       else if (this.view.type === 'blame') V.renderBlame(this);
       else if (this.view.type === 'edit') V.renderEditor(this);
+      else if (this.view.type === 'pr') V.renderPr(this);
+      else if (this.view.type === 'issue') V.renderIssue(this);
       else if (this.view.type === 'conflict') V.renderConflict(this);
       else V.renderGraph(this);
     }
@@ -650,6 +656,7 @@
         if (token !== this.detailsToken) return;
         this.selectedDetails = d;
         V.renderRight(this);
+        if (this.github && !this.selectedIsStash) this.refreshCi();
       } catch (e) {
         toast(e.message, 'error');
       }
@@ -1624,6 +1631,300 @@
       ]);
     }
 
+    // ---------- GitHub ----------
+    // Pedido à API em nome do usuário (o token fica no processo principal).
+    async gh(method, path, body) {
+      const r = await polvo.github.request(method, path, body);
+      if (r.status >= 200 && r.status < 300) return r.data;
+      const msg =
+        r.status === 401
+          ? 'O GitHub recusou o acesso. Conecte sua conta em Preferências → Conta do GitHub.'
+          : r.status === 403 && /rate limit/i.test(r.error || '')
+            ? 'Limite de pedidos ao GitHub atingido. Conecte sua conta nas Preferências para ter um limite maior.'
+            : r.status === 404
+              ? 'Não encontrado no GitHub (ou a conta conectada não tem acesso a este repositório).'
+              : r.status === 0
+                ? `Sem conexão com o GitHub: ${r.error}`
+                : r.error || `O GitHub respondeu ${r.status}.`;
+      const e = new Error(msg);
+      e.status = r.status;
+      throw e;
+    }
+
+    ghBase() {
+      return `/repos/${this.github.owner}/${this.github.repo}`;
+    }
+
+    // Conta, pull requests, issues e CI das pontas de branch. Sem conta conectada
+    // o limite da API é pequeno, então só o commit aberto busca o CI.
+    async refreshGithub(force) {
+      if (this.ghLoading) return;
+      if (!force && this.ghAt && Date.now() - this.ghAt < 60000) return this.refreshCi();
+      this.ghLoading = true;
+      try {
+        if (this.ghAccount === undefined) this.ghAccount = await polvo.github.account();
+        const [prs, issues] = await Promise.all([
+          this.gh('GET', `${this.ghBase()}/pulls?state=open&per_page=50`).catch((e) => ({ error: e.message })),
+          this.gh('GET', `${this.ghBase()}/issues?state=open&per_page=50`).catch((e) => ({ error: e.message })),
+        ]);
+        this.prs = prs;
+        this.issues = Array.isArray(issues) ? issues.filter((i) => !i.pull_request) : issues;
+        this.ghAt = Date.now();
+        V.renderLeft(this);
+      } finally {
+        this.ghLoading = false;
+      }
+      return this.refreshCi();
+    }
+
+    async refreshCi() {
+      if (!this.github) return;
+      const authed = this.ghAccount?.login;
+      const tips = authed ? this.commits.filter((c) => c.refs.some((r) => r.type !== 'tag')).slice(0, 20).map((c) => c.sha) : [];
+      if (this.selected && this.selected !== 'WIP' && !this.selectedIsStash) tips.push(this.selected);
+      const stale = [...new Set(tips)].filter((sha) => {
+        const c = this.ci.get(sha);
+        return !c || (c.state === 'pending' && Date.now() - c.at > 30000);
+      });
+      if (!stale.length) return;
+      await Promise.all(stale.map(async (sha) => this.ci.set(sha, await this.fetchCi(sha).catch(() => ({ state: null, checks: [], at: Date.now() })))));
+      V.renderGraphRows(this);
+      if (this.selectedDetails && stale.includes(this.selectedDetails.sha)) V.renderRight(this);
+    }
+
+    // Junta GitHub Actions (check-runs) e os status antigos num estado só.
+    async fetchCi(sha) {
+      const base = this.ghBase();
+      const [runs, status] = await Promise.all([this.gh('GET', `${base}/commits/${sha}/check-runs?per_page=50`).catch(() => null), this.gh('GET', `${base}/commits/${sha}/status`).catch(() => null)]);
+      const fromRun = (c) => ({
+        name: c.name,
+        state: c.status !== 'completed' ? 'pending' : ['success', 'skipped', 'neutral'].includes(c.conclusion) ? 'success' : c.conclusion === 'cancelled' ? 'cancelled' : 'failure',
+        url: c.html_url,
+      });
+      const fromStatus = (x) => ({ name: x.context, state: x.state === 'error' ? 'failure' : x.state, url: x.target_url });
+      const checks = [...(runs?.check_runs || []).map(fromRun), ...(status?.statuses || []).map(fromStatus)];
+      const state = !checks.length ? null : checks.some((c) => c.state === 'failure') ? 'failure' : checks.some((c) => c.state === 'pending') ? 'pending' : 'success';
+      return { state, checks, at: Date.now() };
+    }
+
+    // ----- pull requests -----
+    async openPr(number) {
+      const v = (this.view = { type: 'pr', number, loading: true });
+      this.renderCenter();
+      try {
+        const base = this.ghBase();
+        const [pr, files, comments, reviews] = await Promise.all([
+          this.gh('GET', `${base}/pulls/${number}`),
+          this.gh('GET', `${base}/pulls/${number}/files?per_page=100`),
+          this.gh('GET', `${base}/issues/${number}/comments?per_page=100`),
+          this.gh('GET', `${base}/pulls/${number}/reviews?per_page=100`),
+        ]);
+        Object.assign(v, { pr, files, comments, reviews, loading: false });
+        if (!this.ci.has(pr.head.sha)) this.ci.set(pr.head.sha, await this.fetchCi(pr.head.sha).catch(() => ({ state: null, checks: [] })));
+      } catch (e) {
+        Object.assign(v, { loading: false, error: e.message });
+      }
+      if (this.view === v) this.renderCenter();
+    }
+
+    async checkoutPr(pr) {
+      const sameRepo = pr.head.repo && pr.head.repo.full_name === `${this.github.owner}/${this.github.repo}`;
+      const remote = this.pushRemote(this.data.refs.local.find((b) => b.current)) || 'origin';
+      if (sameRepo) {
+        const ok = await this.op('Fetch', () => this.repo.run(['fetch', remote, pr.head.ref]));
+        if (ok) return this.checkoutRemote(`${remote}/${pr.head.ref}`);
+        return;
+      }
+      // PR de fork: baixa a referência do PR numa branch local pr-N
+      const name = `pr-${pr.number}`;
+      const how = await this.confirmSwitchWithWip(name);
+      if (!how) return;
+      if (how === 'stash' && !(await this.stashThenSwitch(name))) return;
+      return this.op(`Checkout do PR #${pr.number}`, async () => {
+        await this.repo.run(['fetch', remote, `+refs/pull/${pr.number}/head:refs/heads/${name}`]);
+        await this.repo.run(['switch', name]);
+      }, { success: `Agora em ${name} (PR #${pr.number})` });
+    }
+
+    // event: APPROVE | REQUEST_CHANGES | COMMENT
+    async reviewPr(pr, event) {
+      const label = { APPROVE: 'Aprovar', REQUEST_CHANGES: 'Pedir mudanças', COMMENT: 'Comentar' }[event];
+      const body = await V.messageEditor(`${label} o PR #${pr.number}`, '', { ok: label, allowEmpty: event === 'APPROVE', message: event === 'APPROVE' ? 'Comentário opcional junto com a aprovação.' : 'O texto vai como revisão no PR.' });
+      if (body == null || (event !== 'APPROVE' && !body)) return;
+      try {
+        await this.gh('POST', `${this.ghBase()}/pulls/${pr.number}/reviews`, { event, body: body || undefined });
+        toast(event === 'APPROVE' ? `PR #${pr.number} aprovado` : 'Revisão enviada');
+        this.openPr(pr.number);
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    async mergePr(pr) {
+      const r = await form(
+        `Merge do PR #${pr.number}`,
+        [
+          {
+            name: 'method',
+            label: 'Como juntar',
+            value: 'merge',
+            options: [
+              { value: 'merge', label: 'Commit de merge' },
+              { value: 'squash', label: 'Squash (um commit só)' },
+              { value: 'rebase', label: 'Rebase (reaplica os commits)' },
+            ],
+          },
+          { name: 'del', label: `Excluir a branch ${pr.head.ref} no GitHub depois`, type: 'checkbox', value: false },
+        ],
+        { ok: 'Fazer merge', message: `${pr.head.label} → ${pr.base.ref}` }
+      );
+      if (!r) return;
+      try {
+        await this.gh('PUT', `${this.ghBase()}/pulls/${pr.number}/merge`, { merge_method: r.method });
+        if (r.del && pr.head.repo?.full_name === `${this.github.owner}/${this.github.repo}`) await this.gh('DELETE', `${this.ghBase()}/git/refs/heads/${encodeURIComponent(pr.head.ref)}`).catch(() => {});
+        toast(`PR #${pr.number} juntado em ${pr.base.ref}`);
+        this.ghAt = 0;
+        await this.fetch();
+        this.openPr(pr.number);
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    async createPr() {
+      const head = this.data.head.branch;
+      if (!head) return toast('Faça checkout da branch do PR primeiro.', 'error');
+      const b = this.data.refs.local.find((x) => x.current);
+      if (!b.upstream) return toast(`A branch ${head} ainda não está no GitHub. Faça o push primeiro.`, 'error');
+      if (b.ahead) return toast(`Há ${b.ahead} commit(s) de ${head} que ainda não foram enviados. Faça o push primeiro.`, 'error');
+      const remote = this.pushRemote(b);
+      const bases = (this.data.refs.remotes[remote] || []).map((x) => x.name).filter((n) => n !== b.upstream.slice(remote.length + 1));
+      const repoInfo = await this.gh('GET', this.ghBase()).catch(() => null);
+      const def = repoInfo?.default_branch || (bases.includes('main') ? 'main' : bases[0]);
+      const last = this.commits.find((c) => c.sha === this.headSha);
+      const r = await V.prEditor({ title: last?.subject || head, bases, base: def, head });
+      if (!r) return;
+      try {
+        const pr = await this.gh('POST', `${this.ghBase()}/pulls`, { title: r.title, body: r.body, base: r.base, head: b.upstream.slice(remote.length + 1), draft: r.draft });
+        toast(`PR #${pr.number} criado`);
+        this.ghAt = 0;
+        this.refreshGithub(true);
+        this.openPr(pr.number);
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    // "#123" numa mensagem de commit: pode ser issue ou PR (o GitHub numera os dois juntos).
+    async openRef(number) {
+      try {
+        const x = await this.gh('GET', `${this.ghBase()}/issues/${number}`);
+        return x.pull_request ? this.openPr(number) : this.openIssue(number);
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    // ----- issues -----
+    async openIssue(number) {
+      const v = (this.view = { type: 'issue', number, loading: true });
+      this.renderCenter();
+      try {
+        const base = this.ghBase();
+        const [issue, comments] = await Promise.all([this.gh('GET', `${base}/issues/${number}`), this.gh('GET', `${base}/issues/${number}/comments?per_page=100`)]);
+        Object.assign(v, { issue, comments, loading: false });
+      } catch (e) {
+        Object.assign(v, { loading: false, error: e.message });
+      }
+      if (this.view === v) this.renderCenter();
+    }
+
+    async commentIssue(number, reopen) {
+      const body = await V.messageEditor(`Comentar em #${number}`, '', { ok: 'Comentar' });
+      if (!body) return;
+      try {
+        await this.gh('POST', `${this.ghBase()}/issues/${number}/comments`, { body });
+        this.view.type === 'pr' ? this.openPr(number) : this.openIssue(number);
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    async setIssueState(issue, state) {
+      try {
+        await this.gh('PATCH', `${this.ghBase()}/issues/${issue.number}`, { state });
+        toast(state === 'closed' ? `#${issue.number} fechada` : `#${issue.number} reaberta`);
+        this.ghAt = 0;
+        this.refreshGithub(true);
+        this.openIssue(issue.number);
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    // Branch com o número e o título da issue, para o commit/PR citar "#N".
+    branchForIssue(issue) {
+      const slug = issue.title
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 40);
+      return this.createBranchNamed(`${issue.number}-${slug}`);
+    }
+
+    async createBranchNamed(name) {
+      const how = await this.confirmSwitchWithWip(name);
+      if (!how) return;
+      if (how === 'stash' && !(await this.stashThenSwitch(name))) return;
+      return this.op('Criar branch', () => this.repo.run(['switch', '-c', name]), { success: `Branch ${name} criada` });
+    }
+
+    async createIssue() {
+      const r = await V.prEditor({ title: '', issue: true });
+      if (!r) return;
+      try {
+        const issue = await this.gh('POST', `${this.ghBase()}/issues`, { title: r.title, body: r.body });
+        toast(`Issue #${issue.number} criada`);
+        this.ghAt = 0;
+        this.refreshGithub(true);
+        this.openIssue(issue.number);
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    // ----- forks -----
+    async addForkRemote() {
+      if (!this.github) return toast('Este repositório não tem um remoto no GitHub.', 'error');
+      let info;
+      let forks;
+      try {
+        [info, forks] = await Promise.all([this.gh('GET', this.ghBase()), this.gh('GET', `${this.ghBase()}/forks?per_page=100&sort=newest`)]);
+      } catch (e) {
+        return toast(e.message, 'error');
+      }
+      const originUrl = (await this.repo.raw(['remote', 'get-url', 'origin'])).stdout.trim();
+      const useSsh = /^(git@|ssh:\/\/)/.test(originUrl);
+      const urlOf = (r) => (useSsh ? r.ssh_url : r.clone_url);
+      const existing = new Set(await this.repo.remoteNames());
+      const items = [];
+      const parent = info.parent || info.source;
+      if (parent) items.push({ label: `${parent.full_name}  (o original)`, group: 'upstream', action: () => this.addRemoteNamed(existing.has('upstream') ? parent.owner.login : 'upstream', urlOf(parent)) });
+      for (const f of forks) items.push({ label: f.full_name, group: f.pushed_at ? `atualizado ${new Date(f.pushed_at).toLocaleDateString('pt-BR')}` : 'fork', action: () => this.addRemoteNamed(f.owner.login, urlOf(f)) });
+      if (!items.length) return toast('Este repositório não tem forks nem é um fork.');
+      UI.palette(items, 'Adicionar remoto de um fork...');
+    }
+
+    async addRemoteNamed(name, url) {
+      const existing = await this.repo.remoteNames();
+      let n = name;
+      for (let i = 2; existing.includes(n); i++) n = `${name}${i}`;
+      const ok = await this.op('Adicionar remoto', () => this.repo.run(['remote', 'add', n, url]), { success: `Remoto ${n} adicionado` });
+      if (ok) this.fetch();
+    }
+
     // ---------- Git Flow ----------
     // Mesmas chaves do git-flow (gitflow.*), então funciona junto com a extensão.
     async flowSetup() {
@@ -1952,6 +2253,13 @@
       if (!r || !r.name.trim() || !r.url.trim()) return;
       const ok = await this.op('Adicionar remoto', () => this.repo.run(['remote', 'add', r.name.trim(), r.url.trim()]));
       if (ok) this.fetch();
+    }
+
+    addRemoteMenu() {
+      return [
+        { label: 'Adicionar remoto por URL...', action: () => this.addRemote() },
+        this.github && { label: 'Adicionar fork ou o original do GitHub...', action: () => this.addForkRemote() },
+      ];
     }
 
     async editRemoteUrl(name) {
@@ -2737,18 +3045,31 @@
       if (dir) this.openRepo(dir, replace || this.welcomeOrNull());
     }
 
-    async commandClone(replace) {
+    // Com conta do GitHub, primeiro oferece a lista de repositórios dela.
+    async commandClone(replace, url) {
+      if (url === undefined) {
+        const account = await polvo.github.account();
+        if (account.login) {
+          const res = await polvo.github.request('GET', '/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member');
+          if (res.status === 200 && res.data.length) {
+            const items = [{ label: 'Digitar a URL...', group: '', action: () => this.commandClone(replace, '') }];
+            for (const r of res.data)
+              items.push({ label: r.full_name, group: (r.private ? 'privado · ' : '') + (r.description || '').slice(0, 60), action: () => this.commandClone(replace, r.clone_url) });
+            return UI.palette(items, `Clonar um repositório de ${account.login}...`);
+          }
+        }
+      }
       const r = await form(
         'Clonar repositório',
         [
-          { name: 'url', label: 'URL do repositório', placeholder: 'https://github.com/usuario/projeto.git' },
+          { name: 'url', label: 'URL do repositório', value: url || '', placeholder: 'https://github.com/usuario/projeto.git' },
           { name: 'parent', label: 'Pasta onde clonar', value: this.settings?.lastCloneDir || '', browse: true },
           { name: 'name', label: 'Nome da pasta (opcional)', placeholder: 'derivado da URL' },
         ],
         { ok: 'Clonar' }
       );
       if (!r || !r.url.trim() || !r.parent.trim()) return;
-      const url = r.url.trim();
+      url = r.url.trim();
       const name = r.name.trim() || url.replace(/\/+$/, '').split(/[/:]/).pop().replace(/\.git$/, '');
       polvo.settings.set({ lastCloneDir: r.parent.trim() });
       this.settings.lastCloneDir = r.parent.trim();
@@ -2796,6 +3117,48 @@
         const t = this.repoTab();
         if (t) t.fetchOnOpen({ background: true });
       }, Math.max(5, Number(s.fetchInterval) || 5) * 1000);
+    }
+
+    // ---------- chave SSH no GitHub ----------
+    async sshKeySetup() {
+      const keys = await polvo.ssh.publicKeys();
+      const items = keys.map((k) => ({ label: `Cadastrar ${k.path.split('/').pop()} no GitHub`, group: k.key.split(' ').slice(2).join(' ') || k.key.slice(0, 30), action: () => this.uploadSshKey(k.key, k.path) }));
+      items.push({ label: 'Gerar uma chave nova (ed25519)...', group: '', action: () => this.generateSshKey() });
+      UI.palette(items, 'Chave SSH para o GitHub...');
+    }
+
+    async generateSshKey() {
+      const t = this.repoTab();
+      const email = t?.data.identity?.email || '';
+      const r = await form(
+        'Gerar chave SSH',
+        [
+          { name: 'comment', label: 'Comentário (costuma ser o e-mail)', value: email },
+          { name: 'pass', label: 'Senha da chave (opcional, recomendada)', type: 'password' },
+        ],
+        { ok: 'Gerar', message: 'Cria uma chave ed25519 em ~/.ssh. Nenhuma chave existente é apagada.' }
+      );
+      if (!r) return;
+      const res = await polvo.ssh.keygen(r.comment.trim(), r.pass);
+      if (!res.ok) return toast(res.error, 'error');
+      if (!res.isDefault) toast(`Chave criada em ${res.path}. Como já existia uma id_ed25519, aponte para esta no ~/.ssh/config se quiser usá-la no git.`);
+      return this.uploadSshKey(res.key, res.path);
+    }
+
+    async uploadSshKey(key, file) {
+      const title = await prompt('Cadastrar chave no GitHub', 'Nome da chave no GitHub', `GitPolvo · ${file.split('/').pop()}`, { ok: 'Cadastrar' });
+      if (!title) return;
+      const res = await polvo.github.request('POST', '/user/keys', { title, key });
+      if (res.status === 201) return toast('Chave SSH cadastrada no GitHub');
+      if (res.status === 422 && /already in use/i.test(JSON.stringify(res.data))) return toast('Essa chave já está cadastrada no GitHub.');
+      // sem permissão (ex.: token do gh sem admin:public_key): deixa a pessoa cadastrar à mão
+      navigator.clipboard.writeText(key);
+      const go = await confirmBox(
+        'Não deu para cadastrar sozinho',
+        `${res.status === 404 || res.status === 403 ? 'A conta conectada não deu permissão para gerenciar chaves (escopo admin:public_key).' : res.error || 'Sem conta do GitHub conectada.'}\nA chave pública foi copiada. Abrir a página do GitHub para colar?`,
+        'Abrir o GitHub'
+      );
+      if (go) polvo.openExternal('https://github.com/settings/ssh/new');
     }
 
     // ---------- workspaces ----------
@@ -2854,7 +3217,17 @@
       ]);
       const [sigKey, sigAlways, sigFormat] = await Promise.all([cfg(['--global', 'user.signingkey']), cfg(['--global', '--type=bool', 'commit.gpgsign']), cfg(['--global', 'gpg.format'])]);
       const [lName, lEmail] = t ? await Promise.all([cfg(['--local', 'user.name']), cfg(['--local', 'user.email'])]) : ['', ''];
+      const account = await polvo.github.account();
+      const via = { saved: 'token salvo aqui', env: 'variável GITHUB_TOKEN', gh: 'GitHub CLI (gh)' }[account.source] || '';
       const fields = [
+        {
+          section: 'Conta do GitHub',
+          note: account.login
+            ? `Conectado como ${account.login} (${via}). Usada para pull requests, issues, CI e fotos de perfil. Para usar outra conta, cole um token abaixo.`
+            : 'Não conectado. Crie um token em github.com/settings/tokens (escopos repo, read:org e admin:public_key) e cole abaixo, ou faça login no GitHub CLI (gh auth login).',
+        },
+        { name: 'ghToken', label: 'Token pessoal do GitHub', type: 'password', value: '', placeholder: account.source === 'saved' ? '•••• salvo (deixe vazio para manter)' : 'ghp_... ou github_pat_...' },
+        ...(account.source === 'saved' ? [{ name: 'ghForget', label: 'Esquecer o token salvo neste computador', type: 'checkbox', value: false }] : []),
         { section: 'Identidade no Git (todos os repositórios)' },
         { name: 'gName', label: 'Nome', value: gName, placeholder: 'Seu Nome' },
         { name: 'gEmail', label: 'E-mail', value: gEmail, placeholder: 'voce@exemplo.com' },
@@ -2896,6 +3269,12 @@
       ];
       const r = await form('Preferências', fields, { ok: 'Salvar', wide: true });
       if (!r) return;
+      if (r.ghToken.trim() || r.ghForget) {
+        const res = await polvo.github.setToken(r.ghForget ? '' : r.ghToken.trim());
+        if (!res.ok) toast(res.error, 'error');
+        else toast(res.login ? `GitHub conectado como ${res.login}` : 'Token do GitHub esquecido');
+        for (const t of this.tabs) if (t.kind === 'repo') (t.ghAccount = undefined), (t.ghAt = 0);
+      }
       // git config: vazio remove a chave (volta ao padrão)
       const setCfg = async (scope, key, val, old) => {
         if (val.trim() === old) return;
@@ -2951,6 +3330,7 @@
         ['Preferências...', 'app:prefs'],
         ['Perfis de identidade...', 'app:profiles'],
         ['Salvar abas abertas como workspace...', 'app:saveWorkspace'],
+        ['Chave SSH para o GitHub...', 'app:sshKey'],
         ['Alternar tema claro/escuro', 'view:theme'],
         [UI.avatars.enabled ? 'Desligar fotos de perfil' : 'Ligar fotos de perfil', 'view:avatars'],
         ['Atualizar fotos de perfil (limpar cache)', 'view:clearAvatars'],
@@ -2981,6 +3361,9 @@
           ['Novo worktree...', 'repo:worktree'],
           ['Aplicar patch...', 'repo:applyPatch'],
           ['Histórico de operações', 'repo:opLog'],
+          ['Criar pull request da branch atual...', 'gh:createPr'],
+          ['Nova issue no GitHub...', 'gh:createIssue'],
+          ['Adicionar remoto de um fork do GitHub...', 'gh:fork'],
           ['Git Flow: iniciar feature...', 'flow:feature'],
           ['Git Flow: iniciar release...', 'flow:release'],
           ['Git Flow: iniciar hotfix...', 'flow:hotfix'],
@@ -3042,6 +3425,8 @@
           return this.editProfiles();
         case 'app:saveWorkspace':
           return this.saveWorkspace();
+        case 'app:sshKey':
+          return this.sshKeySetup();
         case 'view:avatars':
           UI.avatars.enabled = !UI.avatars.enabled;
           polvo.settings.set({ avatars: UI.avatars.enabled });
@@ -3112,6 +3497,11 @@
           return t.applyPatchFile();
         case 'repo:opLog':
           return V.opLogModal(t);
+        case 'gh:createPr':
+        case 'gh:createIssue':
+        case 'gh:fork':
+          if (!t.github) return toast('Este repositório não tem um remoto no GitHub.', 'error');
+          return name === 'gh:createPr' ? t.createPr() : name === 'gh:createIssue' ? t.createIssue() : t.addForkRemote();
         case 'flow:feature':
         case 'flow:release':
         case 'flow:hotfix':
