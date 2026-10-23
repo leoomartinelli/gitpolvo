@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const { Repo, hunkPatch, layoutGraph, branchOwners } = window.GitLayer;
+  const { Repo, hunkPatch, layoutGraph, branchOwners, LOG_PAGE } = window.GitLayer;
   const { h, toast, form, prompt, confirmBox, choices, palette, openModal } = window.UI;
   const V = window.Views;
   const polvo = window.polvo;
@@ -22,6 +22,10 @@
       this.layout = { rows: [], maxLanes: 1 };
       this.selected = 'WIP';
       this.selectedDetails = null;
+      this.multi = []; // commits marcados com Ctrl/Shift+clique (2 ou mais)
+      this.compare = null; // { a, b, labelA, labelB, files, counts } da comparação aberta
+      this.logLimit = LOG_PAGE;
+      this.filters = null; // branches escondidas/solo no grafo, lidas das configurações
       this.view = { type: 'graph' };
       this.collapsed = {};
       this.commitDraft = { summary: '', description: '', amend: false };
@@ -51,7 +55,9 @@
       this.refreshing = true;
       try {
         const r = this.repo;
-        const [head, refs, stashes, status, commits, state] = await Promise.all([r.head(), r.refs(), r.stashes(), r.status(), r.log(), r.state()]);
+        if (!this.filters) this.filters = await this.loadFilters();
+        const log = r.log({ limit: this.logLimit, hidden: this.filters.hidden, solo: this.filters.solo });
+        const [head, refs, stashes, status, commits, state] = await Promise.all([r.head(), r.refs(), r.stashes(), r.status(), log, r.state()]);
         const headSha = (await r.raw(['rev-parse', 'HEAD'])).stdout.trim();
         // nada mudou desde a última leitura: só confere o diff aberto, sem redesenhar
         const signature = JSON.stringify([head, refs, stashes, status, state, headSha, commits.map((c) => c.sha + c.refs.map((x) => x.name).join())]);
@@ -66,6 +72,9 @@
         this.layout = layoutGraph(commits);
         this.owners = branchOwners(commits, this.layout.rows);
         this.shaIndex = new Map(commits.map((c, i) => [c.sha, i]));
+        this.hasMoreCommits = commits.length >= this.logLimit;
+        this.multi = this.multi.filter((sha) => this.shaIndex.has(sha));
+        if (this.multi.length < 2) this.multi = [];
         this.headSha = headSha;
         if (this.github === undefined) this.github = await this.detectGithub();
         this._rowItems = null;
@@ -73,6 +82,7 @@
         if (this.selected !== 'WIP' && !this.shaIndex.has(this.selected) && !this.selectedIsStash) this.selected = 'WIP';
         this.render();
         if (this.view.type === 'diff') this.reloadDiff();
+        if (this.compare) this.loadCompare();
       } catch (e) {
         toast('Erro ao ler o repositório:\n' + e.message, 'error');
       } finally {
@@ -82,6 +92,81 @@
           await this.refresh();
         }
       }
+    }
+
+    // Rolar até o fim do grafo lê mais uma página de commits.
+    async loadMoreCommits() {
+      if (this.loadingMore || !this.hasMoreCommits || this.refreshing) return;
+      this.loadingMore = true;
+      this.logLimit += LOG_PAGE;
+      try {
+        await this.refresh();
+      } finally {
+        this.loadingMore = false;
+      }
+    }
+
+    // ---------- filtros do grafo (esconder / solo) ----------
+    // Refs completas (refs/heads/x, refs/remotes/origin/x) ou o remoto inteiro
+    // (refs/remotes/origin/*), guardadas por repositório nas configurações.
+    async loadFilters() {
+      const s = await polvo.settings.get();
+      const f = (s.graphFilters || {})[this.repo.root] || {};
+      return { hidden: f.hidden || [], solo: f.solo || [] };
+    }
+
+    async saveFilters() {
+      const s = await polvo.settings.get();
+      const all = { ...(s.graphFilters || {}) };
+      if (this.filters.hidden.length || this.filters.solo.length) all[this.repo.root] = this.filters;
+      else delete all[this.repo.root];
+      await polvo.settings.set({ graphFilters: all });
+    }
+
+    isHidden(ref) {
+      const hidden = this.filters?.hidden || [];
+      return hidden.includes(ref) || (ref.startsWith('refs/remotes/') && hidden.includes(ref.replace(/^(refs\/remotes\/[^/]+\/).*$/, '$1*')));
+    }
+
+    isSolo(ref) {
+      return !!this.filters?.solo.includes(ref);
+    }
+
+    async setFilters(change) {
+      change(this.filters);
+      await this.saveFilters();
+      this.signature = null; // redesenha mesmo se os commits visíveis forem os mesmos
+      await this.refresh();
+    }
+
+    toggleHidden(ref) {
+      return this.setFilters((f) => {
+        const i = f.hidden.indexOf(ref);
+        if (i >= 0) f.hidden.splice(i, 1);
+        else f.hidden.push(ref);
+      });
+    }
+
+    toggleSolo(ref) {
+      return this.setFilters((f) => {
+        const i = f.solo.indexOf(ref);
+        if (i >= 0) f.solo.splice(i, 1);
+        else f.solo.push(ref);
+      });
+    }
+
+    clearFilters() {
+      return this.setFilters((f) => {
+        f.hidden = [];
+        f.solo = [];
+      });
+    }
+
+    refFilterMenu(ref, { canHide = true } = {}) {
+      return [
+        canHide && { label: this.isHidden(ref) ? 'Mostrar no grafo' : 'Esconder no grafo', action: () => this.toggleHidden(ref) },
+        { label: this.isSolo(ref) ? 'Sair do solo' : 'Solo (mostrar só esta no grafo)', action: () => this.toggleSolo(ref) },
+      ];
     }
 
     // owner/repo do primeiro remoto hospedado no GitHub (origin tem prioridade),
@@ -213,6 +298,8 @@
     select(id) {
       this.selected = id;
       this.selectedIsStash = false;
+      this.multi = [];
+      this.compare = null;
       if (this.view.type !== 'graph' && !(id === 'WIP' && this.view.kind !== 'commit')) {
         this.view = { type: 'graph' };
         this.renderCenter();
@@ -223,9 +310,21 @@
       } else this.loadDetails(id);
     }
 
-    selectSha(sha) {
-      const idx = this.rowItems().findIndex((it) => it.type === 'commit' && it.c.sha.startsWith(sha));
-      if (idx < 0) return toast('Commit fora do histórico carregado.');
+    async selectSha(sha) {
+      const find = () => this.rowItems().findIndex((it) => it.type === 'commit' && it.c.sha.startsWith(sha));
+      let idx = find();
+      // commit antigo: vai lendo mais páginas até achar (ou acabar o histórico)
+      while (idx < 0 && this.hasMoreCommits && !this.refreshing) {
+        const before = this.commits.length;
+        this.logLimit += LOG_PAGE;
+        await this.refresh();
+        if (this.commits.length === before) break;
+        idx = find();
+      }
+      if (idx < 0) {
+        const filtered = this.filters && (this.filters.hidden.length || this.filters.solo.length);
+        return toast(filtered ? 'Commit escondido pelo filtro do grafo.' : 'Commit fora do histórico carregado.');
+      }
       this.select(this.rowItems()[idx].c.sha);
       V.scrollToRow(this, idx);
     }
@@ -233,9 +332,116 @@
     selectStash(stash) {
       this.selected = stash.sha;
       this.selectedIsStash = true;
+      this.multi = [];
+      this.compare = null;
       this.view = { type: 'graph' };
       this.renderCenter();
       this.loadDetails(stash.sha);
+    }
+
+    isSelected(sha) {
+      if (this.multi.length) return this.multi.includes(sha);
+      return !this.compare && this.selected === sha;
+    }
+
+    // Ctrl+clique marca/desmarca; Shift+clique marca o intervalo desde o último clique.
+    clickCommit(sha, e) {
+      if (e && (e.ctrlKey || e.metaKey)) return this.toggleMulti(sha);
+      if (e && e.shiftKey && this.shaIndex.has(this.selected)) return this.rangeMulti(sha);
+      this.select(sha);
+    }
+
+    toggleMulti(sha) {
+      const m = this.multi.length ? this.multi.slice() : this.shaIndex.has(this.selected) ? [this.selected] : [];
+      const i = m.indexOf(sha);
+      if (i >= 0) m.splice(i, 1);
+      else m.push(sha);
+      if (m.length < 2) return this.select(m[0] || sha);
+      this.selected = sha;
+      this.setMulti(m);
+    }
+
+    rangeMulti(sha) {
+      const a = this.shaIndex.get(this.selected);
+      const b = this.shaIndex.get(sha);
+      const m = this.commits.slice(Math.min(a, b), Math.max(a, b) + 1).map((c) => c.sha);
+      if (m.length < 2) return this.select(sha);
+      this.setMulti(m);
+    }
+
+    // do mais novo para o mais antigo, na ordem do grafo
+    multiCommits() {
+      return this.multi.map((sha) => this.commits[this.shaIndex.get(sha)]).sort((x, y) => this.shaIndex.get(x.sha) - this.shaIndex.get(y.sha));
+    }
+
+    setMulti(m) {
+      this.multi = m;
+      this.compare = null;
+      if (m.length === 2) {
+        const [newer, older] = this.multiCommits();
+        this.compare = { a: older.sha, b: newer.sha, labelA: older.sha.slice(0, 7), labelB: newer.sha.slice(0, 7), files: null };
+        this.loadCompare();
+      }
+      if (this.view.type !== 'graph') {
+        this.view = { type: 'graph' };
+        this.renderCenter();
+      } else V.renderGraphRows(this);
+      V.renderRight(this);
+    }
+
+    clearMulti() {
+      this.select(this.shaIndex.has(this.selected) ? this.selected : 'WIP');
+    }
+
+    // ---------- comparação ----------
+    // Mostra no painel direito o que muda de A para B (dois commits ou refs quaisquer).
+    compareRefs(a, b, labelA = a, labelB = b) {
+      this.multi = [];
+      this.compare = { a, b, labelA, labelB, files: null };
+      if (this.view.type !== 'graph') {
+        this.view = { type: 'graph' };
+        this.renderCenter();
+      } else V.renderGraphRows(this);
+      V.renderRight(this);
+      return this.loadCompare();
+    }
+
+    swapCompare() {
+      const c = this.compare;
+      if (!c) return;
+      if (this.multi.length) {
+        Object.assign(c, { a: c.b, b: c.a, labelA: c.labelB, labelB: c.labelA, files: null });
+        V.renderRight(this);
+        return this.loadCompare();
+      }
+      return this.compareRefs(c.b, c.a, c.labelB, c.labelA);
+    }
+
+    async loadCompare() {
+      const c = this.compare;
+      if (!c) return;
+      try {
+        const [files, counts] = await Promise.all([
+          this.repo.compareFiles(c.a, c.b),
+          this.repo.run(['rev-list', '--left-right', '--count', `${c.a}...${c.b}`]),
+        ]);
+        const [onlyA, onlyB] = counts.trim().split(/\s+/).map(Number);
+        Object.assign(c, { files, onlyA, onlyB, error: null });
+      } catch (e) {
+        c.error = e.message;
+      }
+      if (this.compare === c) V.renderRight(this);
+    }
+
+    // Abre a paleta para escolher a outra branch/tag da comparação.
+    pickCompare(ref) {
+      const refs = this.data.refs;
+      const items = [];
+      const add = (name, group) => name !== ref && items.push({ label: name, group, action: () => this.compareRefs(name, ref) });
+      for (const b of refs.local) add(b.name, 'local');
+      for (const list of Object.values(refs.remotes)) for (const b of list) add(b.full, 'remoto');
+      for (const t of refs.tags) add(t.name, 'tag');
+      palette(items, `Comparar ${ref} com...`);
     }
 
     async loadDetails(sha) {
@@ -294,8 +500,8 @@
     }
 
     // ---------- diff ----------
-    async openDiff(kind, file, sha, parents) {
-      this.view = { type: 'diff', kind, file, sha, parents, loading: true, files: [] };
+    async openDiff(kind, file, sha, parents, label) {
+      this.view = { type: 'diff', kind, file, sha, parents, label, loading: true, files: [] };
       this.renderCenter();
       if (this.selected === 'WIP') V.renderRight(this);
       else V.renderRight(this);
@@ -644,6 +850,81 @@
       });
     }
 
+    // Aplica do mais antigo para o mais novo, como estavam no histórico.
+    async cherryPickMany(list) {
+      const shas = list.map((c) => c.sha).reverse();
+      if (!(await confirmBox('Cherry-pick', `Aplicar ${shas.length} commits em "${this.data.head.branch || 'HEAD'}"?`, 'Cherry-pick'))) return;
+      return this.op('Cherry-pick', async () => {
+        const r = await this.repo.raw(['cherry-pick', ...shas]);
+        if (r.code !== 0) {
+          if (/conflict/i.test(r.stdout + r.stderr)) return toast('Cherry-pick com conflitos. Resolva e clique em "Continuar".', 'error');
+          throw new Error(r.stderr || r.stdout);
+        }
+        this.select('WIP');
+      });
+    }
+
+    // Desfaz do mais novo para o mais antigo, um commit de revert para cada.
+    async revertMany(list) {
+      const shas = list.map((c) => c.sha);
+      if (!(await confirmBox('Reverter commits', `Criar ${shas.length} commits que desfazem os selecionados?`, 'Reverter'))) return;
+      return this.op('Revert', async () => {
+        const r = await this.repo.raw(['revert', '--no-edit', ...shas]);
+        if (r.code !== 0) {
+          if (/conflict/i.test(r.stdout + r.stderr)) return toast('Revert com conflitos. Resolva e clique em "Continuar".', 'error');
+          throw new Error(r.stderr || r.stdout);
+        }
+        this.select('WIP');
+      });
+    }
+
+    // ---------- rebase interativo ----------
+    // Reaplica os commits depois de `base` conforme o plano montado na janela:
+    // o git lê a lista pronta (sequence.editor copia o arquivo) e os rewords
+    // viram um "exec git commit --amend" logo depois do pick.
+    async interactiveRebase(base) {
+      if (this.data.state !== 'clean') return toast('Finalize ou aborte a operação em andamento primeiro.', 'error');
+      const branch = this.data.head.branch;
+      if ((await this.repo.raw(['merge-base', '--is-ancestor', base, 'HEAD'])).code !== 0) return toast(`Esse commit não faz parte da branch ${branch}.`, 'error');
+      const out = await this.repo.run(['log', '--reverse', `--format=%H%x1f%P%x1f%an%x1f%B%x1e`, `${base}..HEAD`]);
+      const commits = out
+        .split('\x1e')
+        .map((x) => x.replace(/^\n/, ''))
+        .filter(Boolean)
+        .map((rec) => {
+          const [sha, parents, author, message] = rec.split('\x1f');
+          return { sha, parents: parents.split(' ').filter(Boolean), author, message: message.trim() };
+        });
+      if (!commits.length) return toast('Não há commits depois desse para reorganizar.');
+      if (commits.some((c) => c.parents.length > 1)) return toast('Há merges nesse intervalo. O rebase interativo só reorganiza commits sem merge.', 'error');
+      const plan = await V.rebaseEditor(this, commits, { branch, base: base.slice(0, 7) });
+      if (!plan) return;
+      const gitDir = await this.repo.gitDir();
+      const q = (p) => `'${p.replace(/'/g, `'\\''`)}'`;
+      const todo = [];
+      let n = 0;
+      for (const step of plan) {
+        if (step.action === 'reword' && step.message.trim() && step.message.trim() !== step.original) {
+          const file = `polvo-rebase-msg-${++n}`;
+          await polvo.writeFile(gitDir, file, step.message.trim() + '\n');
+          todo.push(`pick ${step.sha}`, `exec git commit --amend --only --allow-empty -q -F ${q(gitDir + '/' + file)}`);
+        } else todo.push(`${step.action === 'reword' ? 'pick' : step.action} ${step.sha}`);
+      }
+      await polvo.writeFile(gitDir, 'polvo-rebase-todo', todo.join('\n') + '\n');
+      return this.op(`Rebase interativo de ${branch}`, async () => {
+        const r = await this.repo.raw(['-c', `sequence.editor=cp ${q(gitDir + '/polvo-rebase-todo')}`, '-c', 'core.editor=true', 'rebase', '-i', '--autostash', base]);
+        if (r.code !== 0) {
+          if (/CONFLICT|could not apply/i.test(r.stdout + r.stderr)) {
+            toast('Rebase parou por conflito. Resolva e clique em "Continuar" na faixa amarela.', 'error');
+            this.selected = 'WIP';
+            return;
+          }
+          throw new Error(r.stderr || r.stdout);
+        }
+        toast(`Rebase interativo de ${branch} concluído`);
+      });
+    }
+
     async reset(sha) {
       const r = await form(
         'Reset da branch atual',
@@ -936,6 +1217,10 @@
         { label: 'Renomear...', action: () => this.renameBranch(name) },
         b && b.upstream && { label: `Upstream: ${b.upstream}`, disabled: true, action: () => {} },
         '-',
+        !isCur && cur && { label: `Comparar com ${cur}`, action: () => this.compareRefs(cur, name) },
+        { label: 'Comparar com...', action: () => this.pickCompare(name) },
+        ...this.refFilterMenu('refs/heads/' + name, { canHide: !isCur }),
+        '-',
         { label: 'Copiar nome', action: () => this.copy(name) },
         !isCur && { label: 'Excluir branch', danger: true, action: () => this.deleteBranch(name) },
       ];
@@ -954,6 +1239,10 @@
         cur && { label: `Merge de ${full} em ${cur}`, action: () => this.merge(full) },
         cur && { label: `Rebase de ${cur} sobre ${full}`, action: () => this.rebase(full) },
         '-',
+        cur && { label: `Comparar com ${cur}`, action: () => this.compareRefs(cur, full) },
+        { label: 'Comparar com...', action: () => this.pickCompare(full) },
+        ...this.refFilterMenu('refs/remotes/' + full),
+        '-',
         { label: 'Copiar nome', action: () => this.copy(full) },
         { label: 'Excluir no servidor', danger: true, action: () => this.deleteRemoteBranch(remote, name) },
       ];
@@ -962,6 +1251,10 @@
     remoteMenu(remote) {
       return [
         { label: `Fetch de ${remote}`, action: () => this.op('Fetch', () => this.repo.run(['fetch', '--prune', remote])) },
+        {
+          label: this.isHidden(`refs/remotes/${remote}/*`) ? `Mostrar as branches de ${remote} no grafo` : `Esconder as branches de ${remote} no grafo`,
+          action: () => this.toggleHidden(`refs/remotes/${remote}/*`),
+        },
         { label: 'Copiar URL', action: async () => this.copy((await this.repo.run(['remote', 'get-url', remote])).trim()) },
         '-',
         { label: 'Remover remoto', danger: true, action: () => this.removeRemote(remote) },
@@ -987,6 +1280,19 @@
       ];
     }
 
+    multiMenu() {
+      const list = this.multiCommits();
+      const n = list.length;
+      return [
+        n === 2 && { label: 'Comparar os dois', action: () => V.renderRight(this) },
+        { label: `Cherry-pick de ${n} commits`, action: () => this.cherryPickMany(list) },
+        { label: `Reverter ${n} commits`, action: () => this.revertMany(list) },
+        '-',
+        { label: 'Copiar SHAs', action: () => this.copy(list.map((c) => c.sha).join('\n')) },
+        { label: 'Limpar seleção', action: () => this.clearMulti() },
+      ];
+    }
+
     commitMenu(c) {
       const cur = this.data.head.branch;
       return [
@@ -997,7 +1303,9 @@
         { label: 'Cherry-pick', disabled: c.sha === this.headSha, action: () => this.cherryPick(c.sha) },
         { label: 'Reverter commit', action: () => this.revert(c.sha) },
         cur && { label: `Reset de ${cur} para este commit...`, action: () => this.reset(c.sha) },
+        cur && c.sha !== this.headSha && { label: `Rebase interativo de ${cur} a partir daqui...`, action: () => this.interactiveRebase(c.sha) },
         '-',
+        c.sha !== this.headSha && { label: 'Comparar com o HEAD', action: () => this.compareRefs(c.sha, 'HEAD', c.sha.slice(0, 7), 'HEAD') },
         { label: 'Copiar SHA', action: () => this.copy(c.sha) },
         { label: 'Copiar mensagem', action: () => this.copy(c.subject) },
       ];
@@ -1669,6 +1977,7 @@
       }
       if (inField || !t) return;
       if (e.key === 'Escape' && t.view.type !== 'graph') return t.closeView();
+      if (e.key === 'Escape' && (t.multi.length || t.compare)) return t.clearMulti();
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
         return t.move(1);

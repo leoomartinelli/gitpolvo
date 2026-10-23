@@ -5,7 +5,7 @@
 
 const FS = '\x1f';
 const RS = '\x1e';
-const LOG_LIMIT = 3000;
+const LOG_PAGE = 3000; // commits lidos por vez; rolar até o fim do grafo carrega mais
 
 class GitError extends Error {
   constructor(args, result) {
@@ -41,15 +41,31 @@ class Repo {
   async state() {
     const probe = async (rel) => (await this.raw(['rev-parse', '-q', '--verify', rel])).code === 0;
     if (await probe('MERGE_HEAD')) return 'merge';
-    if (await probe('REBASE_HEAD')) return 'rebase';
+    if (await this.rebasing()) return 'rebase';
     if (await probe('CHERRY_PICK_HEAD')) return 'cherry-pick';
     if (await probe('REVERT_HEAD')) return 'revert';
     return 'clean';
   }
 
-  async log() {
+  async gitDir() {
+    if (!this._gitDir) this._gitDir = (await this.run(['rev-parse', '--absolute-git-dir'])).trim();
+    return this._gitDir;
+  }
+
+  // O git pode deixar REBASE_HEAD para trás (ex.: depois de um squash); a pasta
+  // rebase-merge/rebase-apply só existe enquanto o rebase está em andamento.
+  async rebasing() {
+    const dir = await this.gitDir();
+    const [merge, apply] = await Promise.all([window.polvo.readFile(dir, 'rebase-merge/head-name'), window.polvo.readFile(dir, 'rebase-apply/head-name')]);
+    return merge != null || apply != null;
+  }
+
+  // hidden: refs (ou globs como refs/remotes/origin/*) fora do grafo.
+  // solo: se não vazio, o grafo mostra só o histórico dessas refs.
+  async log({ limit = LOG_PAGE, hidden = [], solo = [] } = {}) {
     const fmt = ['%H', '%P', '%an', '%ae', '%at', '%s', '%D', '%b'].join(FS) + RS;
-    const r = await this.raw(['log', '--decorate=full', '--exclude=refs/stash', '--all', '--date-order', `-n${LOG_LIMIT}`, `--format=${fmt}`]);
+    const revs = solo.length ? ['--ignore-missing', ...solo] : ['--exclude=refs/stash', ...hidden.map((x) => `--exclude=${x}`), '--all'];
+    const r = await this.raw(['log', '--decorate=full', ...revs, '--date-order', `-n${limit}`, `--format=${fmt}`, '--']);
     if (r.code !== 0) return []; // repositório sem commits
     return r.stdout
       .split(RS)
@@ -170,6 +186,11 @@ class Repo {
       message: body.trim(),
       files,
     };
+  }
+
+  // Arquivos alterados entre dois commits quaisquer (comparação A → B).
+  async compareFiles(a, b) {
+    return this.commitFiles(b, [a]);
   }
 
   async commitFiles(sha, parents) {
@@ -368,4 +389,4 @@ function branchOwners(commits, rows) {
   return owners;
 }
 
-window.GitLayer = { Repo, GitError, parseDiff, hunkPatch, layoutGraph, branchOwners };
+window.GitLayer = { Repo, GitError, parseDiff, hunkPatch, layoutGraph, branchOwners, LOG_PAGE };

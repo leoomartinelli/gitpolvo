@@ -13,6 +13,15 @@
 
 # Novidades
 
+## Grafo sem limite, filtros, seleção múltipla e rebase interativo
+
+- O grafo carrega mais commits ao chegar no fim da rolagem, em vez de parar nos 3000 primeiros
+- Olho na lista da esquerda para esconder uma branch (ou um remoto inteiro) do grafo, e "Solo" no menu para ver só as branches escolhidas; a escolha fica salva por repositório
+- Ctrl+clique e Shift+clique marcam vários commits, para cherry-pick ou revert de todos de uma vez
+- Com dois commits marcados, o painel da direita mostra os arquivos que mudam entre eles; nas branches, "Comparar com..." faz o mesmo entre duas branches ou tags
+- Rebase interativo pelo menu do commit: reordenar, editar a mensagem, juntar ou remover commits numa janela só
+- A faixa de "Rebase em andamento" não aparece mais depois que o rebase já terminou
+
 ## Stash aparece no grafo depois de trocar de branch
 
 - Ao guardar o WIP no stash e trocar de branch, o stash fica visível no grafo (e na lista da esquerda), como no GitKraken

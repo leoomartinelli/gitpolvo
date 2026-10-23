@@ -4,7 +4,7 @@
 // (RepoTab, definida em app.js) e lê o estado dela; ações chamam métodos da aba.
 
 (() => {
-  const { h, svg, laneColor, avatar, relDate, fullDate, showMenu } = window.UI;
+  const { h, svg, laneColor, avatar, relDate, fullDate, showMenu, openModal } = window.UI;
   const LW = 24;
   const NODE = 20; // diâmetro da foto no nó do grafo
   const CORNER = 12; // raio das dobras das linhas do grafo
@@ -16,6 +16,10 @@
     '<svg viewBox="0 0 16 16" width="13" height="13"><path d="M8 1.6l5.6 3.1v6.6L8 14.4l-5.6-3.1V4.7z" fill="none" stroke="#f0883e" stroke-width="1.5" stroke-linejoin="round"/><path d="M2.6 4.8L8 7.8l5.4-3M8 7.8v6.4" fill="none" stroke="#f0883e" stroke-width="1.5" stroke-linejoin="round"/></svg>';
   const ICON_TAG =
     '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M2 2h6l6 6-6 6-6-6z" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="5.5" cy="5.5" r="1.2" fill="currentColor"/></svg>';
+  const ICON_EYE =
+    '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="2" fill="currentColor"/></svg>';
+  const ICON_EYE_OFF =
+    '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M2.5 13.5l11-11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
   const icon = (svgText) => h('span', { class: 'bi', html: svgText });
   const graphWidth = (maxLanes) => Math.max(64, maxLanes * LW + 10);
   const ROW_H = 28;
@@ -326,6 +330,25 @@
     return sec;
   }
 
+  // Botão de olho na lista da esquerda: esconde/mostra a ref no grafo.
+  function eyeButton(tab, ref) {
+    const hidden = tab.isHidden(ref);
+    return h('button', {
+      class: 'eye-btn' + (hidden ? ' on' : ''),
+      title: hidden ? 'Mostrar no grafo' : 'Esconder no grafo',
+      html: hidden ? ICON_EYE_OFF : ICON_EYE,
+      onclick: (e) => {
+        e.stopPropagation();
+        tab.toggleHidden(ref);
+      },
+      ondblclick: (e) => e.stopPropagation(),
+    });
+  }
+
+  function soloMark(tab, ref) {
+    return tab.isSolo(ref) ? h('span', { class: 'solo-mark', title: 'Solo: o grafo mostra só as branches marcadas' }, 'solo') : null;
+  }
+
   function renderLeft(tab) {
     const L = tab.els.left;
     const prevScroll = L.querySelector('.sections')?.scrollTop || 0;
@@ -350,7 +373,7 @@
       h(
         'div',
         {
-          class: 'ref-item' + (b.current ? ' current' : ''),
+          class: 'ref-item' + (b.current ? ' current' : '') + (tab.isHidden('refs/heads/' + b.name) ? ' ref-hidden' : ''),
           draggable: 'true',
           'data-ref': 'local:' + b.name,
           title: (b.upstream ? `${b.name} → ${b.upstream}` : b.name) + (b.behind ? (b.current ? '\nDuplo clique: pull' : '\nDuplo clique: checkout e pull') : ''),
@@ -369,7 +392,9 @@
           b.gone ? h('span', { class: 'gone', title: 'upstream removido' }, '✕') : null,
           b.behind ? `↓${b.behind} ` : '',
           b.ahead ? `↑${b.ahead}` : ''
-        )
+        ),
+        soloMark(tab, 'refs/heads/' + b.name),
+        b.current ? h('span', { class: 'eye-slot' }) : eyeButton(tab, 'refs/heads/' + b.name)
       )
     );
 
@@ -396,7 +421,8 @@
             },
           },
           h('span', {}, groupCollapsed ? '▸' : '▾'),
-          h('span', { class: 'name' }, '☁ ' + remote)
+          h('span', { class: 'name' }, '☁ ' + remote),
+          eyeButton(tab, `refs/remotes/${remote}/*`)
         )
       );
       if (!groupCollapsed) {
@@ -406,7 +432,7 @@
             h(
               'div',
               {
-                class: 'ref-item sub',
+                class: 'ref-item sub' + (tab.isHidden('refs/remotes/' + b.full) ? ' ref-hidden' : ''),
                 draggable: 'true',
                 'data-ref': 'remote:' + b.full,
                 title: local?.behind ? `${b.full}\nDuplo clique: ${local.current ? 'pull' : 'checkout e pull'}` : b.full,
@@ -417,7 +443,9 @@
                   showMenu(e.clientX, e.clientY, tab.remoteBranchMenu(remote, b.name));
                 },
               },
-              h('span', { class: 'name' }, b.name)
+              h('span', { class: 'name' }, b.name),
+              soloMark(tab, 'refs/remotes/' + b.full),
+              eyeButton(tab, 'refs/remotes/' + b.full)
             )
           );
         }
@@ -772,12 +800,33 @@
     return r;
   }
 
+  // Faixa acima do grafo quando há branches escondidas ou em solo.
+  function filterBar(tab) {
+    const f = tab.filters;
+    if (!f || (!f.hidden.length && !f.solo.length)) return null;
+    const short = (r) => r.replace(/^refs\/(heads|remotes)\//, '').replace(/\/\*$/, ' (remoto inteiro)');
+    const text = f.solo.length
+      ? `Solo: mostrando só ${f.solo.map(short).join(', ')}`
+      : f.hidden.length === 1
+        ? `1 branch escondida: ${short(f.hidden[0])}`
+        : `${f.hidden.length} branches escondidas`;
+    return h(
+      'div',
+      { class: 'graph-filter-bar', title: [...f.solo, ...f.hidden].map(short).join('\n') },
+      h('span', { class: 'bi', html: ICON_EYE_OFF }),
+      h('span', { class: 'grow ellip' }, text),
+      h('button', { class: 'btn small', onclick: () => tab.clearFilters() }, 'Mostrar tudo')
+    );
+  }
+
   function renderGraph(tab) {
     const C = tab.els.center;
     C.innerHTML = '';
+    const bar = filterBar(tab);
+    if (bar) C.append(bar);
     const items = tab.rowItems();
     if (!items.length) {
-      C.append(h('div', { class: 'empty' }, 'Este repositório ainda não tem commits. Faça o primeiro commit pelo painel à direita.'));
+      C.append(h('div', { class: 'empty' }, bar ? 'Nenhum commit nas branches escolhidas.' : 'Este repositório ainda não tem commits. Faça o primeiro commit pelo painel à direita.'));
       return;
     }
     applyColumnWidths(tab);
@@ -793,7 +842,7 @@
       h('button', { class: 'icon-btn cols-btn', title: 'Escolher colunas', onclick: (e) => columnsMenu(tab, e) }, '⚙')
     );
     const scroll = h('div', { class: 'graph-scroll', tabindex: '0' });
-    const inner = h('div', { class: 'graph-inner', style: { height: items.length * ROW_H + 'px' } });
+    const inner = h('div', { class: 'graph-inner', style: { height: (items.length + (tab.hasMoreCommits ? 1 : 0)) * ROW_H + 'px' } });
     scroll.append(inner);
     scroll.addEventListener('scroll', () => renderGraphRows(tab));
     C.append(head, scroll);
@@ -855,14 +904,16 @@
       } else {
         const c = it.c;
         const hit = q && it.searchText.includes(q);
+        const sel = tab.isSelected(c.sha);
         row = h(
           'div',
           {
-            class: 'g-row' + (tab.selected === c.sha ? ' selected' : '') + (q ? (hit ? ' match' : ' dimmed') : ''),
+            class: 'g-row' + (sel ? ' selected' : '') + (q ? (hit ? ' match' : ' dimmed') : ''),
             style: { top: i * ROW_H + 'px' },
-            onclick: () => tab.select(c.sha),
+            onclick: (e) => tab.clickCommit(c.sha, e),
             oncontextmenu: (e) => {
               e.preventDefault();
+              if (tab.multi.length && sel) return showMenu(e.clientX, e.clientY, tab.multiMenu());
               tab.select(c.sha);
               showMenu(e.clientX, e.clientY, tab.commitMenu(c));
             },
@@ -876,7 +927,7 @@
           h(
             'div',
             { class: 'col-graph' },
-            rowSvg(it.g, tab.layout.maxLanes, { hasRefs: c.refs.length > 0, ghost: !c.refs.length && !!it.owner, selected: tab.selected === c.sha, colWidth: gw }),
+            rowSvg(it.g, tab.layout.maxLanes, { hasRefs: c.refs.length > 0, ghost: !c.refs.length && !!it.owner, selected: sel, colWidth: gw }),
             it.g.isMerge ? null : nodeAvatar(tab, c, it.g)
           ),
           h(
@@ -891,6 +942,11 @@
         );
       }
       inner.append(row);
+    }
+    // fim do que foi lido: mostra a linha de espera e pede a próxima página
+    if (tab.hasMoreCommits && last >= items.length) {
+      inner.append(h('div', { class: 'g-row more-row', style: { top: items.length * ROW_H + 'px' } }, 'Carregando mais commits...'));
+      tab.loadMoreCommits();
     }
   }
 
@@ -988,8 +1044,98 @@
       }
       return;
     }
+    if (tab.multi.length) return renderMulti(tab, R);
+    if (tab.compare) return renderCompare(tab, R);
     if (tab.selectedDetails) return renderCommit(tab, R, tab.selectedDetails);
     R.append(h('div', { class: 'empty' }, 'Carregando...'));
+  }
+
+  // Arquivos que mudam de A para B; clicar abre o diff no centro.
+  function compareSection(tab, c) {
+    const sel = tab.view.type === 'diff' && tab.view.kind === 'commit' && tab.view.sha === c.b && tab.view.parents?.[0] === c.a ? tab.view.file : null;
+    const wrap = h('div', { class: 'compare' });
+    wrap.append(
+      h(
+        'div',
+        { class: 'compare-head' },
+        h('span', { class: 'mono strong', title: c.a }, c.labelA),
+        h('span', { class: 'dim' }, '→'),
+        h('span', { class: 'mono strong', title: c.b }, c.labelB),
+        h('span', { class: 'grow' }),
+        h('button', { class: 'btn small', title: 'Inverter a comparação', onclick: () => tab.swapCompare() }, '⇄ Inverter')
+      )
+    );
+    if (c.error) {
+      wrap.append(h('div', { class: 'empty' }, c.error));
+      return wrap;
+    }
+    if (!c.files) {
+      wrap.append(h('div', { class: 'empty' }, 'Comparando...'));
+      return wrap;
+    }
+    if (c.onlyA != null)
+      wrap.append(h('div', { class: 'dim small compare-counts' }, `${c.onlyB} commit(s) só em ${c.labelB} · ${c.onlyA} commit(s) só em ${c.labelA}`));
+    wrap.append(
+      h('h4', {}, `Arquivos diferentes (${c.files.length})`),
+      h(
+        'div',
+        { class: 'file-list tall flat' },
+        c.files.length
+          ? c.files.map((f) => fileRow(f, { selected: sel === f.path, onclick: () => tab.openDiff('commit', f.path, c.b, [c.a], `${c.labelA} → ${c.labelB}`) }))
+          : h('div', { class: 'file-row dim' }, 'Nenhuma diferença entre os dois')
+      )
+    );
+    return wrap;
+  }
+
+  function renderCompare(tab, R) {
+    R.append(
+      h(
+        'div',
+        { class: 'commit-id' },
+        'comparação',
+        h('span', { class: 'grow' }),
+        h('button', { class: 'icon-btn', title: 'Fechar comparação (Esc)', onclick: () => tab.clearMulti() }, '✕')
+      ),
+      h('div', { class: 'panel-scroll' }, compareSection(tab, tab.compare))
+    );
+  }
+
+  function renderMulti(tab, R) {
+    const list = tab.multiCommits();
+    const box = h('div', { class: 'panel-scroll' });
+    box.append(
+      h(
+        'div',
+        { class: 'multi-actions' },
+        h('button', { class: 'btn small', onclick: () => tab.cherryPickMany(list) }, `Cherry-pick (${list.length})`),
+        h('button', { class: 'btn small', onclick: () => tab.revertMany(list) }, `Reverter (${list.length})`)
+      ),
+      h(
+        'div',
+        { class: 'file-list multi-list' },
+        list.map((c) =>
+          h(
+            'div',
+            { class: 'file-row', title: c.subject, onclick: () => tab.select(c.sha) },
+            avatar(c.author, c.email, false, tab.avatarCtx(c.sha)),
+            h('span', { class: 'mono dim' }, c.sha.slice(0, 7)),
+            h('span', { class: 'fpath' }, h('span', { class: 'fname' }, c.subject))
+          )
+        )
+      ),
+      tab.compare ? compareSection(tab, tab.compare) : h('div', { class: 'dim small hint' }, 'Selecione exatamente dois commits para comparar os arquivos entre eles.')
+    );
+    R.append(
+      h(
+        'div',
+        { class: 'commit-id' },
+        `${list.length} commits selecionados`,
+        h('span', { class: 'grow' }),
+        h('button', { class: 'icon-btn', title: 'Limpar seleção (Esc)', onclick: () => tab.clearMulti() }, '✕')
+      ),
+      box
+    );
   }
 
   function renderWip(tab, R) {
@@ -1314,7 +1460,7 @@
     } else if (v.kind === 'staged') {
       actions.push(h('button', { class: 'btn small', onclick: () => tab.unstage([v.file]) }, 'Unstage arquivo'));
     }
-    const label = { unstaged: 'não preparado', untracked: 'novo arquivo', staged: 'preparado', commit: v.sha ? 'commit ' + v.sha.slice(0, 7) : '' }[v.kind];
+    const label = v.label || { unstaged: 'não preparado', untracked: 'novo arquivo', staged: 'preparado', commit: v.sha ? 'commit ' + v.sha.slice(0, 7) : '' }[v.kind];
     C.append(
       h(
         'div',
@@ -1460,5 +1606,126 @@
     );
   }
 
-  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, ROW_H };
+  // ---------- rebase interativo ----------
+  const REBASE_ACTIONS = [
+    ['pick', 'Manter'],
+    ['reword', 'Editar mensagem'],
+    ['squash', 'Juntar com o de baixo'],
+    ['fixup', 'Juntar e descartar a mensagem'],
+    ['drop', 'Remover'],
+  ];
+
+  // Janela do rebase interativo. Mostra os commits do mais novo (em cima) para o
+  // mais antigo, como no grafo; devolve o plano na ordem do git (mais antigo
+  // primeiro) ou null se cancelar.
+  function rebaseEditor(tab, commits, { branch, base }) {
+    const steps = commits
+      .slice()
+      .reverse()
+      .map((c) => ({ ...c, action: 'pick', original: c.message, subject: c.message.split('\n')[0] }));
+    return new Promise((resolve) => {
+      openModal(
+        (close) => {
+          const list = h('div', { class: 'rebase-list' });
+          const err = h('div', { class: 'rebase-error' });
+          const start = h(
+            'button',
+            { class: 'btn primary', onclick: () => close(steps.slice().reverse().map(({ sha, action, message, original }) => ({ sha, action, message, original }))) },
+            'Iniciar rebase'
+          );
+          const validate = () => {
+            let msg = '';
+            if (!steps.some((st) => st.action !== 'drop')) msg = 'Mantenha pelo menos um commit. Para descartar todos, use o Reset.';
+            steps.forEach((st, i) => {
+              // squash/fixup junta com o commit mantido logo abaixo
+              if (!msg && (st.action === 'squash' || st.action === 'fixup') && !steps.slice(i + 1).some((x) => x.action !== 'drop'))
+                msg = `${st.sha.slice(0, 7)} não tem um commit abaixo para juntar.`;
+              if (!msg && st.action === 'reword' && !st.message.trim()) msg = `A mensagem de ${st.sha.slice(0, 7)} está vazia.`;
+            });
+            err.textContent = msg;
+            start.disabled = !!msg;
+          };
+          let dragFrom = null;
+          const move = (from, to) => {
+            if (to < 0 || to >= steps.length || from === to) return;
+            const [st] = steps.splice(from, 1);
+            steps.splice(to, 0, st);
+            render();
+          };
+          const render = () => {
+            list.innerHTML = '';
+            steps.forEach((st, i) => {
+              const select = h('select', {}, REBASE_ACTIONS.map(([v, l]) => h('option', { value: v, selected: v === st.action }, l)));
+              select.addEventListener('change', () => {
+                st.action = select.value;
+                render();
+              });
+              let msgEl;
+              if (st.action === 'reword') {
+                msgEl = h('textarea', { rows: 3, spellcheck: 'true' });
+                msgEl.value = st.message;
+                msgEl.addEventListener('input', () => {
+                  st.message = msgEl.value;
+                  validate();
+                });
+              } else msgEl = h('span', { class: 'ellip', title: st.message }, st.subject);
+              const row = h(
+                'div',
+                { class: 'rebase-row act-' + st.action },
+                h(
+                  'span',
+                  {
+                    class: 'grip',
+                    title: 'Arraste para reordenar',
+                    draggable: 'true',
+                    ondragstart: (e) => {
+                      dragFrom = i;
+                      e.dataTransfer.effectAllowed = 'move';
+                      e.dataTransfer.setDragImage(row, 12, 12);
+                    },
+                  },
+                  '⋮⋮'
+                ),
+                select,
+                h('span', { class: 'mono dim' }, st.sha.slice(0, 7)),
+                h('div', { class: 'rebase-msg' }, msgEl),
+                h('span', { class: 'dim small ellip rebase-author' }, st.author),
+                h('button', { class: 'icon-btn', title: 'Subir', disabled: i === 0, onclick: () => move(i, i - 1) }, '↑'),
+                h('button', { class: 'icon-btn', title: 'Descer', disabled: i === steps.length - 1, onclick: () => move(i, i + 1) }, '↓')
+              );
+              row.addEventListener('dragover', (e) => {
+                if (dragFrom == null) return;
+                e.preventDefault();
+                row.classList.add('drop-target');
+              });
+              row.addEventListener('dragleave', () => row.classList.remove('drop-target'));
+              row.addEventListener('drop', (e) => {
+                e.preventDefault();
+                const from = dragFrom;
+                dragFrom = null;
+                move(from, i);
+              });
+              row.addEventListener('dragend', () => (dragFrom = null));
+              list.append(row);
+            });
+            validate();
+          };
+          render();
+          return h(
+            'div',
+            { class: 'modal wide rebase-modal' },
+            h('h2', {}, `Rebase interativo de ${branch}`),
+            h('div', { class: 'msg' }, `${steps.length} commit(s) depois de ${base}, do mais novo (em cima) para o mais antigo. Arraste pela alça ou use as setas para mudar a ordem.`),
+            h('div', { class: 'msg warn' }, 'Isso reescreve o histórico. Se esses commits já foram enviados, o próximo push vai precisar ser forçado.'),
+            list,
+            err,
+            h('div', { class: 'actions' }, h('button', { class: 'btn', onclick: () => close(null) }, 'Cancelar'), start)
+          );
+        },
+        { onClose: resolve }
+      );
+    });
+  }
+
+  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, rebaseEditor, ROW_H };
 })();
