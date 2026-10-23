@@ -2722,3 +2722,233 @@ button.sb-item:hover {
   font-family: var(--mono);
   resize: vertical;
 }
+
+/* ---------- blame ---------- */
+.blame-body {
+  flex: 1;
+  overflow: auto;
+  font-size: 12px;
+}
+
+.blame-row {
+  display: flex;
+  align-items: stretch;
+  min-width: max-content;
+  line-height: 18px;
+}
+
+.blame-row.start {
+  border-top: 1px solid var(--border);
+}
+
+.blame-row.odd {
+  background: var(--bg-2);
+}
+
+.blame-age {
+  width: 3px;
+  flex: none;
+  background: var(--accent);
+}
+
+.blame-info {
+  width: 330px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  cursor: pointer;
+  font-family: inherit;
+  position: sticky;
+  left: 0;
+  background: inherit;
+}
+
+.blame-row:not(.odd) .blame-info {
+  background: var(--bg);
+}
+
+.blame-info .avatar {
+  flex: none;
+}
+
+.blame-sum {
+  flex: 1;
+  min-width: 0;
+}
+
+.blame-wip {
+  color: var(--warn);
+  font-style: italic;
+}
+
+.blame-row .ln {
+  width: 48px;
+  flex: none;
+  text-align: right;
+  padding-right: 8px;
+  color: var(--text-dim);
+  opacity: 0.7;
+  font-family: var(--mono);
+  user-select: none;
+}
+
+.blame-row .code {
+  font-family: var(--mono);
+  white-space: pre;
+  padding-left: 8px;
+  user-select: text;
+}
+
+/* ---------- editor de conflitos ---------- */
+.merge-panes {
+  overflow: auto;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.merge-cols-head {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.merge-cols-head > div {
+  padding: 4px 10px;
+}
+
+.merge-ctx {
+  opacity: 0.55;
+  padding: 2px 0;
+}
+
+.merge-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 0 10px;
+  font-family: var(--mono);
+  white-space: pre-wrap;
+  word-break: break-all;
+  min-height: 18px;
+}
+
+.merge-skip {
+  padding: 2px 10px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.merge-block {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin: 6px 0;
+}
+
+.merge-block .cb-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 4px 8px;
+  background: var(--bg-3);
+}
+
+.merge-block .cb-head .grow {
+  flex: 1;
+}
+
+.merge-block.done .cb-head strong {
+  color: var(--accent);
+}
+
+.merge-sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.merge-side.ours {
+  background: var(--add-bg);
+}
+
+.merge-side.theirs {
+  background: var(--hunk-bg);
+  border-left: 1px solid var(--border);
+}
+
+.merge-side-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  color: var(--text-dim);
+  border-bottom: 1px dashed var(--border);
+}
+
+.merge-line.pick {
+  cursor: pointer;
+}
+
+.merge-line.pick input {
+  margin: 2px 0 0;
+  flex: none;
+  accent-color: var(--accent);
+}
+
+.merge-line.pick.on {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.merge-line .code {
+  flex: 1;
+}
+
+/* ---------- preferências e afins ---------- */
+.modal.form-wide {
+  max-height: 84vh;
+  overflow-y: auto;
+}
+
+.modal .form-section {
+  margin: 10px 0 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
+
+.modal .form-note {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: -6px;
+}
+
+.sec-tools {
+  display: inline-flex;
+  align-items: center;
+}
+
+.sec-tools .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+}
+
+.btn.outline-dim {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.prefs-btn {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 4px;
+}

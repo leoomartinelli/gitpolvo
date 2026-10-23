@@ -517,6 +517,8 @@ function buildMenu() {
         { label: 'Abrir no gerenciador de arquivos', click: cmd('repo:reveal') },
         { label: 'Abrir terminal externo', accelerator: 'Alt+T', click: cmd('repo:terminal') },
         { type: 'separator' },
+        { label: 'Preferências...', accelerator: 'CmdOrCtrl+,', click: cmd('app:prefs') },
+        { type: 'separator' },
         { label: 'Fechar aba', accelerator: 'CmdOrCtrl+W', click: cmd('tab:close') },
         { role: 'quit', label: 'Sair' },
       ],

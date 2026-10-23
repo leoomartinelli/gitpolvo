@@ -167,8 +167,9 @@ function openModal(build, { onClose } = {}) {
   return close;
 }
 
-// fields: [{ name, label, value, type, placeholder, options, browse }]
-function form(title, fields, { ok = 'OK', danger = false, message } = {}) {
+// fields: [{ name, label, value, type, placeholder, options, browse }] ou
+// { section, note } para um título de grupo
+function form(title, fields, { ok = 'OK', danger = false, message, wide = false } = {}) {
   return new Promise((resolve) => {
     openModal(
       (close) => {
@@ -179,7 +180,7 @@ function form(title, fields, { ok = 'OK', danger = false, message } = {}) {
           close(out);
         };
         const body = h('form', {
-          class: 'modal',
+          class: 'modal' + (wide ? ' wide form-wide' : ''),
           onsubmit: (e) => {
             e.preventDefault();
             submit();
@@ -188,6 +189,11 @@ function form(title, fields, { ok = 'OK', danger = false, message } = {}) {
         body.append(h('h2', {}, title));
         if (message) body.append(h('div', { class: 'msg' }, message));
         for (const f of fields) {
+          if (f.section) {
+            body.append(h('h3', { class: 'form-section' }, f.section));
+            if (f.note) body.append(h('div', { class: 'form-note' }, f.note));
+            continue;
+          }
           let input;
           if (f.options) {
             input = h('select', {}, f.options.map((o) => h('option', { value: o.value, selected: o.value === f.value }, o.label)));

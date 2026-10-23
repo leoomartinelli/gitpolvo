@@ -13,6 +13,14 @@
 
 # Novidades
 
+## Blame, editor de conflitos e preferências
+
+- Blame: veja quem alterou cada linha de um arquivo (botão no diff, no histórico ou botão direito no arquivo); clique no trecho para ir ao commit
+- Editor de conflitos com os dois lados lado a lado: marque linha por linha o que fica, ou use Meu/Deles/Ambos/Nenhum; o resultado embaixo continua editável
+- Tela de preferências (engrenagem ao lado da busca ou Ctrl+,): nome e e-mail do Git (geral ou só do repositório), fetch automático e intervalo, tema, diff, fotos e nome da branch inicial
+- No ⚙ do grafo e no olho do "Remoto", escolha quais remotos aparecem no grafo ou deixe só as branches locais
+- Abrir o commit no GitHub, GitLab ou Bitbucket, ou copiar o link, pelo menu do commit ou pelo painel de detalhes
+
 ## Desfazer de verdade, stage por linha e histórico do arquivo
 
 - Desfazer e Refazer (Ctrl+Z / Ctrl+Shift+Z) valem para commit, amend, checkout, criar/renomear/excluir branch e tag, descartes, reset, merge, rebase, pull, cherry-pick e revert, enquanto o GitPolvo estiver aberto

@@ -253,6 +253,13 @@ class Repo {
       });
   }
 
+  // rev omitido = arquivo do diretório de trabalho (linhas sem commit aparecem como tal)
+  async blame(file, rev) {
+    const r = await this.raw(['blame', '--porcelain', ...(rev ? [rev] : []), '--', file]);
+    if (r.code !== 0) throw new GitError(['blame'], r);
+    return parseBlame(r.stdout);
+  }
+
   async applyPatch(patch, { cached = true, reverse = false } = {}) {
     const args = ['apply', '--whitespace=nowarn', '--unidiff-zero'];
     if (cached) args.push('--cached');
@@ -260,6 +267,53 @@ class Repo {
     args.push('-');
     return this.run(args, patch);
   }
+}
+
+const UNCOMMITTED = '0'.repeat(40);
+
+// Saída de `git blame --porcelain`: cada linha traz o commit; os dados do
+// commit (autor, data, resumo) vêm só na primeira vez que ele aparece.
+function parseBlame(text) {
+  const commits = {};
+  const lines = [];
+  let cur = null;
+  for (const l of text.split('\n')) {
+    if (l.startsWith('\t')) {
+      lines.push({ sha: cur, text: l.slice(1) });
+      continue;
+    }
+    const m = /^([0-9a-f]{40}) \d+ \d+/.exec(l);
+    if (m) {
+      cur = m[1];
+      commits[cur] ||= { sha: cur, uncommitted: cur === UNCOMMITTED };
+      continue;
+    }
+    if (!cur) continue;
+    const sp = l.indexOf(' ');
+    const key = sp < 0 ? l : l.slice(0, sp);
+    const val = sp < 0 ? '' : l.slice(sp + 1);
+    const c = commits[cur];
+    if (key === 'author') c.author = val;
+    else if (key === 'author-mail') c.email = val.replace(/^<|>$/g, '');
+    else if (key === 'author-time') c.date = new Date(Number(val) * 1000);
+    else if (key === 'summary') c.summary = val;
+  }
+  return { commits, lines };
+}
+
+// Página web do repositório a partir da URL do remoto (https, ssh ou scp),
+// para montar o link de um commit no GitHub, GitLab ou Bitbucket.
+function remoteWeb(url) {
+  const m = /^(?:https?:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/|ssh:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/|[^@\s]+@([^:/]+):)(.+?)(?:\.git)?\/?$/.exec(String(url || '').trim());
+  if (!m) return null;
+  const host = (m[1] || m[2] || m[3]).toLowerCase();
+  const path = m[4].replace(/^\/+/, '');
+  const kind = host.includes('github') ? 'github' : host.includes('gitlab') ? 'gitlab' : host.includes('bitbucket') ? 'bitbucket' : null;
+  if (!kind || !path.includes('/')) return null;
+  const base = `https://${host}/${path}`;
+  const name = { github: 'GitHub', gitlab: 'GitLab', bitbucket: 'Bitbucket' }[kind];
+  const commit = { github: (sha) => `${base}/commit/${sha}`, gitlab: (sha) => `${base}/-/commit/${sha}`, bitbucket: (sha) => `${base}/commits/${sha}` }[kind];
+  return { kind, name, base, commitUrl: commit };
 }
 
 function parseDecorations(raw) {
@@ -459,4 +513,4 @@ function branchOwners(commits, rows) {
   return owners;
 }
 
-window.GitLayer = { Repo, GitError, parseDiff, hunkPatch, linesPatch, layoutGraph, branchOwners, LOG_PAGE };
+window.GitLayer = { Repo, GitError, parseDiff, parseBlame, remoteWeb, hunkPatch, linesPatch, layoutGraph, branchOwners, LOG_PAGE };

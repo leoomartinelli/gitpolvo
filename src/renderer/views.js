@@ -164,6 +164,7 @@
     pop: '<path d="M5 12h14v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2z"/><path d="M12 14V4"/><path d="M8 8l4-4 4 4"/>',
     terminal: '<path d="M5 8l5 4-5 4"/><path d="M12 16h7"/>',
     folder: '<path d="M3.5 7.5h5.2l1.8 2H20.5v9.2a1.3 1.3 0 0 1-1.3 1.3H4.8a1.3 1.3 0 0 1-1.3-1.3z"/><path d="M3.5 7.5V6.2A1.2 1.2 0 0 1 4.7 5h4.2"/>',
+    gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
     caret: '<svg viewBox="0 0 8 8" width="8" height="8"><path d="M1.6 2.6l2.4 2.8 2.4-2.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   };
 
@@ -292,7 +293,10 @@
       }
     });
     tab.els.search = search;
-    right.append(search);
+    right.append(
+      search,
+      h('button', { class: 'icon-btn prefs-btn', title: 'Preferências (Ctrl+,)', html: tbSvg(TB.gear), onclick: () => tab.app.openPreferences() })
+    );
   }
 
   function renderBanner(tab) {
@@ -517,7 +521,30 @@
       'div',
       { class: 'sections' },
       section(tab, 'local', 'Local', local.length, localItems, add('Nova branch', () => tab.createBranch())),
-      section(tab, 'remote', 'Remoto', remoteCount, remoteItems, add('Adicionar remoto', () => tab.addRemote())),
+      section(
+        tab,
+        'remote',
+        'Remoto',
+        remoteCount,
+        remoteItems,
+        h(
+          'span',
+          { class: 'sec-tools' },
+          h(
+            'button',
+            {
+              class: 'icon-btn',
+              title: 'Escolher quais remotos aparecem no grafo',
+              html: ICON_EYE,
+              onclick: (e) => {
+                e.stopPropagation();
+                showMenu(e.clientX, e.clientY, tab.remotesFilterMenu());
+              },
+            }
+          ),
+          add('Adicionar remoto', () => tab.addRemote())
+        )
+      ),
       section(tab, 'tags', 'Tags', tags.length, tagItems, add('Nova tag no HEAD', () => tab.createTag('HEAD'))),
       section(tab, 'stashes', 'Stashes', st.length, stashItems)
     );
@@ -761,18 +788,19 @@
   }
 
   function columnsMenu(tab, e) {
-    showMenu(
-      e.clientX,
-      e.clientY,
-      OPTIONAL_COLS.map(([key, label]) => ({
+    showMenu(e.clientX, e.clientY, [
+      { label: 'Colunas', disabled: true, action: () => {} },
+      ...OPTIONAL_COLS.map(([key, label]) => ({
         label: (colPrefs.show[key] ? '✓ ' : '\u2003') + label,
         action: () => {
           colPrefs.show[key] = !colPrefs.show[key];
           window.polvo.settings.set({ columns: { ...colPrefs } });
           renderGraph(tab);
         },
-      }))
-    );
+      })),
+      '-',
+      ...tab.remotesFilterMenu(),
+    ]);
   }
 
   function columnWidths(tab) {
@@ -1230,6 +1258,7 @@
                     /\.[^./]+$/.test(f.path) && { label: `Ignorar todos os *${f.path.match(/\.[^./]+$/)[0]}`, action: () => tab.ignore('*' + f.path.match(/\.[^./]+$/)[0]) },
                     { label: 'Copiar caminho', action: () => navigator.clipboard.writeText(f.path) },
                     !f.untracked && { label: 'Histórico do arquivo', action: () => tab.openHistory(f.path) },
+                    !f.untracked && f.status !== 'D' && { label: 'Blame', action: () => tab.openBlame(f.path) },
                   ]);
                 },
                 actions: h(
@@ -1267,6 +1296,7 @@
                   showMenu(e.clientX, e.clientY, [
                     { label: 'Unstage', action: () => tab.unstage([f.path]) },
                     { label: 'Histórico do arquivo', action: () => tab.openHistory(f.path) },
+                    f.status !== 'D' && { label: 'Blame', action: () => tab.openBlame(f.path) },
                   ]);
                 },
                 actions: h(
@@ -1372,7 +1402,10 @@
         'commit: ',
         h('span', { class: 'mono link', title: 'Copiar SHA completo', onclick: () => tab.copy(d.sha) }, d.sha.slice(0, 7)),
         h('span', { class: 'grow' }),
-        tab.selectedIsStash ? h('span', { class: 'dim' }, 'stash') : null
+        tab.selectedIsStash ? h('span', { class: 'dim' }, 'stash') : null,
+        !tab.selectedIsStash && tab.web
+          ? h('button', { class: 'btn small outline-dim', title: tab.web.commitUrl(d.sha), onclick: () => window.polvo.openExternal(tab.web.commitUrl(d.sha)) }, `Abrir no ${tab.web.name} ↗`)
+          : null
       )
     );
     const box = h('div', { class: 'panel-scroll' });
@@ -1398,6 +1431,7 @@
         e.preventDefault();
         showMenu(e.clientX, e.clientY, [
           { label: 'Histórico do arquivo', action: () => tab.openHistory(f.path) },
+          f.status !== 'D' && { label: 'Blame neste commit', action: () => tab.openBlame(f.path, d.sha) },
           { label: 'Copiar caminho', action: () => navigator.clipboard.writeText(f.path) },
         ]);
       };
@@ -1611,6 +1645,9 @@
         actions,
         diffModeToggle(tab),
         v.kind !== 'untracked' ? h('button', { class: 'btn small', title: 'Commits que mexeram neste arquivo', onclick: () => tab.openHistory(v.file) }, 'Histórico') : null,
+        v.kind !== 'untracked' && v.kind !== 'staged'
+          ? h('button', { class: 'btn small', title: 'Quem mexeu em cada linha', onclick: () => tab.openBlame(v.file, v.kind === 'commit' ? v.sha : undefined) }, 'Blame')
+          : null,
         h('button', { class: 'icon-btn', title: 'Fechar (Esc)', onclick: () => tab.closeView() }, '✕')
       ),
       pickBar
@@ -1644,6 +1681,62 @@
     body.scrollTop = prevScroll;
   }
 
+  // ---------- blame ----------
+  // Cada trecho de linhas do mesmo commit leva autor, data e resumo na margem;
+  // a faixa colorida fica mais forte quanto mais recente o commit.
+  function renderBlame(tab) {
+    const C = tab.els.center;
+    const v = tab.view;
+    const prev = C.querySelector('.blame-body')?.scrollTop || 0;
+    C.innerHTML = '';
+    C.append(
+      h(
+        'div',
+        { class: 'diff-head' },
+        h('span', { class: 'path', title: v.file }, 'Blame de ', v.file),
+        h('span', { class: 'dim' }, v.rev ? 'no commit ' + v.rev.slice(0, 7) : 'como está no diretório'),
+        h('button', { class: 'btn small', onclick: () => tab.openHistory(v.file) }, 'Histórico'),
+        h('button', { class: 'icon-btn', title: 'Fechar (Esc)', onclick: () => tab.closeView() }, '✕')
+      )
+    );
+    if (v.loading) return C.append(h('div', { class: 'empty' }, 'Carregando...'));
+    if (v.error) return C.append(h('div', { class: 'empty' }, v.error));
+    const dates = Object.values(v.commits)
+      .map((c) => +c.date || 0)
+      .filter(Boolean);
+    const oldest = Math.min(...dates);
+    const span = Math.max(1, Math.max(...dates) - oldest);
+    const body = h('div', { class: 'blame-body' });
+    let prevSha = null;
+    let band = 0;
+    v.lines.forEach((l, i) => {
+      const c = v.commits[l.sha] || { sha: l.sha };
+      const start = l.sha !== prevSha;
+      if (start) band++;
+      prevSha = l.sha;
+      const age = c.uncommitted ? 1 : ((+c.date || oldest) - oldest) / span;
+      const gutter = start
+        ? h(
+            'div',
+            { class: 'blame-info', title: c.uncommitted ? 'Ainda não commitado' : `${c.summary}\n${c.author} · ${fullDate(c.date)}\nClique para ver no grafo`, onclick: () => tab.blameGoTo(c) },
+            c.uncommitted ? h('span', { class: 'blame-wip' }, 'não commitado') : [avatar(c.author, c.email, false, tab.avatarCtx(c.sha)), h('span', { class: 'ellip blame-sum' }, c.summary), h('span', { class: 'dim small' }, relDate(c.date)), h('span', { class: 'mono dim small' }, c.sha.slice(0, 7))]
+          )
+        : h('div', { class: 'blame-info' });
+      body.append(
+        h(
+          'div',
+          { class: 'blame-row' + (start ? ' start' : '') + (band % 2 ? ' odd' : '') },
+          h('span', { class: 'blame-age', style: { opacity: String(0.15 + 0.85 * age) } }),
+          gutter,
+          h('span', { class: 'ln' }, i + 1),
+          h('span', { class: 'code' }, l.text)
+        )
+      );
+    });
+    C.append(body);
+    body.scrollTop = prev;
+  }
+
   // ---------- histórico de um arquivo ----------
   function renderHistory(tab) {
     const C = tab.els.center;
@@ -1658,6 +1751,20 @@
         h('span', { class: 'path', title: v.file }, 'Histórico de ', v.file),
         h('span', { class: 'dim' }, v.loading ? 'carregando...' : `${v.entries.length} commit(s)`),
         diffModeToggle(tab),
+        v.sel
+          ? h(
+              'button',
+              {
+                class: 'btn small',
+                title: 'Quem mexeu em cada linha, neste commit',
+                onclick: () => {
+                  const e = v.entries.find((x) => x.sha === v.sel);
+                  tab.openBlame(e.path, e.sha);
+                },
+              },
+              'Blame'
+            )
+          : null,
         h('button', { class: 'icon-btn', title: 'Fechar (Esc)', onclick: () => tab.closeView() }, '✕')
       )
     );
@@ -1740,66 +1847,164 @@
     return segs;
   }
 
+  // Linhas escolhidas de cada lado entram no resultado na ordem: as minhas e
+  // depois as deles. Conflito ainda sem escolha volta com os marcadores.
   function assemble(segs) {
     return segs
       .map((s) => {
         if (s.type === 'text') return s.text;
-        if (s.choice === 'ours') return s.ours.join('\n');
-        if (s.choice === 'theirs') return s.theirs.join('\n');
-        if (s.choice === 'both') return [...s.ours, ...s.theirs].join('\n');
-        if (s.choice === 'both-rev') return [...s.theirs, ...s.ours].join('\n');
-        return ['<<<<<<< ' + s.oursLabel, ...s.ours, '=======', ...s.theirs, '>>>>>>> ' + s.theirsLabel].join('\n');
+        if (!s.touched) return ['<<<<<<< ' + s.oursLabel, ...s.ours, '=======', ...s.theirs, '>>>>>>> ' + s.theirsLabel].join('\n');
+        const lines = [...s.ours.filter((_, i) => s.pick.ours.has(i)), ...s.theirs.filter((_, i) => s.pick.theirs.has(i))];
+        return lines.length ? lines.join('\n') : null; // "Nenhum": o trecho some sem deixar linha vazia
       })
+      .filter((t) => t !== null)
       .join('\n');
+  }
+
+  function choose(s, which) {
+    s.touched = true;
+    s.pick = {
+      ours: new Set(which === 'ours' || which === 'both' ? s.ours.map((_, i) => i) : []),
+      theirs: new Set(which === 'theirs' || which === 'both' ? s.theirs.map((_, i) => i) : []),
+    };
+  }
+
+  // Trecho igual nos dois lados: mostra só as bordas.
+  function contextBlock(text) {
+    const lines = text.split('\n');
+    const shown = lines.length > 7 ? [...lines.slice(0, 3), null, ...lines.slice(-3)] : lines;
+    return h(
+      'div',
+      { class: 'merge-ctx' },
+      shown.map((l) => (l === null ? h('div', { class: 'merge-skip' }, `… ${lines.length - 6} linhas iguais …`) : h('div', { class: 'merge-line' }, h('span', { class: 'code' }, l || ' '))))
+    );
   }
 
   function renderConflict(tab) {
     const C = tab.els.center;
     const v = tab.view;
+    const prevTop = C.querySelector('.merge-panes')?.scrollTop || 0;
     C.innerHTML = '';
     if (v.content == null) {
       C.append(h('div', { class: 'empty' }, 'Não foi possível ler o arquivo (binário ou removido). Use "ours"/"theirs" no menu do arquivo.'));
       return;
     }
     const segs = v.segs || (v.segs = parseConflicts(v.content));
-    const output = h('textarea', { spellcheck: 'false' });
-    const refresh = () => {
-      output.value = assemble(segs);
-    };
-    const blocks = h('div', { class: 'conflict-blocks' });
+    for (const s of segs) if (s.type === 'conflict' && !s.pick) s.pick = { ours: new Set(), theirs: new Set() };
+    if (v.output == null) v.output = assemble(segs);
     const conflicts = segs.filter((s) => s.type === 'conflict');
-    conflicts.forEach((s, idx) => {
-      const choose = (c) => {
-        s.choice = c;
-        renderConflict(tab);
+    const done = conflicts.filter((s) => s.touched).length;
+    const update = () => {
+      v.output = assemble(segs);
+      renderConflict(tab);
+    };
+
+    const panes = h('div', { class: 'merge-panes' });
+    panes.append(
+      h(
+        'div',
+        { class: 'merge-cols-head' },
+        h('div', {}, 'Meu: ', h('span', { class: 'mono' }, conflicts[0]?.oursLabel || 'HEAD')),
+        h('div', {}, 'Deles: ', h('span', { class: 'mono' }, conflicts[0]?.theirsLabel || ''))
+      )
+    );
+    let n = 0;
+    for (const s of segs) {
+      if (s.type === 'text') {
+        if (s.text) panes.append(contextBlock(s.text));
+        continue;
+      }
+      const idx = ++n;
+      const side = (which) => {
+        const lines = s[which];
+        const all = lines.length > 0 && lines.every((_, i) => s.pick[which].has(i));
+        const head = h('input', { type: 'checkbox', title: 'Marcar todas as linhas deste lado' });
+        head.checked = all;
+        head.addEventListener('change', () => {
+          s.touched = true;
+          s.pick[which] = new Set(head.checked ? lines.map((_, i) => i) : []);
+          update();
+        });
+        return h(
+          'div',
+          { class: 'merge-side ' + which },
+          h('label', { class: 'merge-side-head' }, head, which === 'ours' ? 'Todas as minhas' : 'Todas as deles'),
+          lines.length
+            ? lines.map((l, i) => {
+                const cb = h('input', { type: 'checkbox' });
+                cb.checked = s.pick[which].has(i);
+                cb.addEventListener('change', () => {
+                  s.touched = true;
+                  if (cb.checked) s.pick[which].add(i);
+                  else s.pick[which].delete(i);
+                  update();
+                });
+                return h('label', { class: 'merge-line pick' + (cb.checked ? ' on' : '') }, cb, h('span', { class: 'code' }, l || ' '));
+              })
+            : h('div', { class: 'merge-line dim' }, h('span', { class: 'code' }, '(nada deste lado)'))
+        );
       };
-      blocks.append(
+      const btn = (label, which) =>
+        h(
+          'button',
+          {
+            class: 'btn small',
+            onclick: () => {
+              choose(s, which);
+              update();
+            },
+          },
+          label
+        );
+      panes.append(
         h(
           'div',
-          { class: 'cblock' + (s.choice ? ' done' : '') },
+          { class: 'merge-block' + (s.touched ? ' done' : ''), 'data-conflict': idx },
           h(
             'div',
             { class: 'cb-head' },
-            h('strong', { class: 'grow' }, `Conflito ${idx + 1} de ${conflicts.length}`, s.choice ? ` — escolhido: ${s.choice}` : ''),
-            h('button', { class: 'btn small', onclick: () => choose('ours') }, 'Usar meu'),
-            h('button', { class: 'btn small', onclick: () => choose('theirs') }, 'Usar deles'),
-            h('button', { class: 'btn small', onclick: () => choose('both') }, 'Ambos'),
-            s.choice ? h('button', { class: 'btn small', onclick: () => choose(null) }, 'Desfazer') : null
+            h('strong', { class: 'grow' }, `Conflito ${idx} de ${conflicts.length}`, s.touched ? ' — resolvido' : ''),
+            btn('Usar meu', 'ours'),
+            btn('Usar deles', 'theirs'),
+            btn('Ambos', 'both'),
+            btn('Nenhum', 'none'),
+            s.touched
+              ? h(
+                  'button',
+                  {
+                    class: 'btn small',
+                    title: 'Voltar a deixar este conflito sem escolha',
+                    onclick: () => {
+                      s.touched = false;
+                      s.pick = { ours: new Set(), theirs: new Set() };
+                      update();
+                    },
+                  },
+                  'Desfazer'
+                )
+              : null
           ),
-          h('div', { class: 'cb-head dim' }, 'Meu: ', s.oursLabel || 'HEAD'),
-          h('div', { class: 'side ours' }, s.ours.join('\n') || ' '),
-          h('div', { class: 'cb-head dim' }, 'Deles: ', s.theirsLabel),
-          h('div', { class: 'side theirs' }, s.theirs.join('\n') || ' ')
+          h('div', { class: 'merge-sides' }, side('ours'), side('theirs'))
         )
       );
-    });
-    if (!conflicts.length) blocks.append(h('div', { class: 'empty' }, 'Nenhum marcador de conflito encontrado. Revise o resultado abaixo e salve.'));
-    refresh();
+    }
+    if (!conflicts.length) panes.append(h('div', { class: 'empty' }, 'Nenhum marcador de conflito encontrado. Revise o resultado abaixo e salve.'));
+
+    const output = h('textarea', { spellcheck: 'false' });
+    output.value = v.output;
+    output.addEventListener('input', () => (v.output = output.value));
+    const next = () => {
+      const s = conflicts.findIndex((c) => !c.touched);
+      const el = panes.querySelector(`[data-conflict="${s + 1}"]`);
+      if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    };
     C.append(
       h(
         'div',
         { class: 'diff-head' },
         h('span', { class: 'path' }, '⚠ ', v.file),
+        h('span', { class: 'dim' }, `${done} de ${conflicts.length} resolvido(s)`),
+        done < conflicts.length ? h('button', { class: 'btn small', onclick: next }, 'Próximo conflito') : null,
         h('button', { class: 'btn small', onclick: () => tab.resolveWith(v.file, 'ours') }, 'Arquivo inteiro: meu'),
         h('button', { class: 'btn small', onclick: () => tab.resolveWith(v.file, 'theirs') }, 'Arquivo inteiro: deles'),
         h('button', { class: 'icon-btn', title: 'Fechar (Esc)', onclick: () => tab.closeView() }, '✕')
@@ -1807,15 +2012,22 @@
       h(
         'div',
         { class: 'conflict-body' },
-        blocks,
+        panes,
         h(
           'div',
           { class: 'conflict-output' },
-          h('div', { class: 'row', style: { display: 'flex', alignItems: 'center', gap: '8px' } }, h('strong', { style: { flex: 1 } }, 'Resultado (editável)'), h('button', { class: 'btn primary small', onclick: () => tab.saveConflict(v.file, output.value) }, 'Salvar e marcar resolvido')),
+          h(
+            'div',
+            { class: 'row', style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+            h('strong', {}, 'Resultado (editável)'),
+            h('span', { class: 'dim small', style: { flex: 1 } }, 'Marcar linhas acima refaz o resultado.'),
+            h('button', { class: 'btn primary small', onclick: () => tab.saveConflict(v.file, output.value) }, 'Salvar e marcar resolvido')
+          ),
           output
         )
       )
     );
+    panes.scrollTop = prevTop;
   }
 
   // ---------- rebase interativo ----------
@@ -1939,5 +2151,5 @@
     });
   }
 
-  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, renderHistory, rebaseEditor, messageEditor, setDiffPrefs, ROW_H };
+  window.Views = { setColumnPrefs, buildLayout, renderToolbar, renderBanner, renderLeft, renderGraph, renderGraphRows, scrollToRow, renderRight, renderDiff, renderConflict, renderHistory, renderBlame, rebaseEditor, messageEditor, setDiffPrefs, ROW_H };
 })();

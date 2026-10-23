@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const { Repo, hunkPatch, linesPatch, layoutGraph, branchOwners, LOG_PAGE } = window.GitLayer;
+  const { Repo, hunkPatch, linesPatch, remoteWeb, layoutGraph, branchOwners, LOG_PAGE } = window.GitLayer;
   const { h, toast, form, prompt, confirmBox, choices, palette, openModal } = window.UI;
   const V = window.Views;
   const polvo = window.polvo;
@@ -79,6 +79,7 @@
         if (this.multi.length < 2) this.multi = [];
         this.headSha = headSha;
         if (this.github === undefined) this.github = await this.detectGithub();
+        if (this.web === undefined) this.web = await this.detectWeb();
         this._rowItems = null;
         this.rowItems(); // já reserva as colunas extras dos stashes antes de medir o grafo
         if (this.selected !== 'WIP' && !this.shaIndex.has(this.selected) && !this.selectedIsStash) this.selected = 'WIP';
@@ -164,6 +165,27 @@
       });
     }
 
+    // Liga/desliga cada remoto no grafo (usado no ⚙ do grafo e no cabeçalho "Remoto").
+    remotesFilterMenu() {
+      const remotes = Object.keys(this.data.refs?.remotes || {});
+      if (!remotes.length) return [{ label: 'Nenhum remoto', disabled: true, action: () => {} }];
+      const glob = (r) => `refs/remotes/${r}/*`;
+      const anyShown = remotes.some((r) => !this.isHidden(glob(r)));
+      return [
+        { label: 'Branches remotas no grafo', disabled: true, action: () => {} },
+        ...remotes.map((r) => ({ label: (this.isHidden(glob(r)) ? '\u2003' : '✓ ') + r, action: () => this.toggleHidden(glob(r)) })),
+        '-',
+        {
+          label: anyShown ? 'Esconder todas as remotas (só locais)' : 'Mostrar todas as remotas',
+          action: () =>
+            this.setFilters((f) => {
+              f.hidden = f.hidden.filter((x) => !x.startsWith('refs/remotes/'));
+              if (anyShown) f.hidden.push(...remotes.map(glob));
+            }),
+        },
+      ];
+    }
+
     refFilterMenu(ref, { canHide = true } = {}) {
       return [
         canHide && { label: this.isHidden(ref) ? 'Mostrar no grafo' : 'Esconder no grafo', action: () => this.toggleHidden(ref) },
@@ -182,6 +204,31 @@
         if (m) return { owner: m[1], repo: m[2] };
       }
       return null;
+    }
+
+    // Site do primeiro remoto reconhecido (origin primeiro), para os links de commit.
+    async detectWeb() {
+      const out = (await this.repo.raw(['remote', '-v'])).stdout;
+      const urls = out
+        .split('\n')
+        .filter((l) => l.endsWith('(fetch)'))
+        .sort((a, b) => (b.startsWith('origin\t') ? 1 : 0) - (a.startsWith('origin\t') ? 1 : 0))
+        .map((l) => l.split('\t')[1].replace(/\s+\(fetch\)$/, ''));
+      for (const u of urls) {
+        const web = remoteWeb(u);
+        if (web) return web;
+      }
+      return null;
+    }
+
+    // Itens "abrir/copiar link" do commit no site do remoto.
+    webMenu(sha) {
+      if (!this.web) return [];
+      const url = this.web.commitUrl(sha);
+      return [
+        { label: `Abrir commit no ${this.web.name}`, action: () => polvo.openExternal(url) },
+        { label: 'Copiar link do commit', action: () => this.copy(url) },
+      ];
     }
 
     // Todos os arquivos versionados no commit (para "Ver todos os arquivos").
@@ -271,6 +318,7 @@
     renderCenter() {
       if (this.view.type === 'diff') V.renderDiff(this);
       else if (this.view.type === 'history') V.renderHistory(this);
+      else if (this.view.type === 'blame') V.renderBlame(this);
       else if (this.view.type === 'conflict') V.renderConflict(this);
       else V.renderGraph(this);
     }
@@ -641,6 +689,28 @@
       this.view = { type: 'graph' };
       this.renderCenter();
       V.renderRight(this);
+    }
+
+    // ---------- blame ----------
+    // rev omitido = arquivo como está no diretório de trabalho.
+    async openBlame(file, rev) {
+      const v = (this.view = { type: 'blame', file, rev, loading: true, lines: [], commits: {} });
+      this.renderCenter();
+      try {
+        Object.assign(v, await this.repo.blame(file, rev));
+      } catch (e) {
+        v.error = e.message;
+      }
+      if (this.view !== v) return;
+      v.loading = false;
+      this.renderCenter();
+    }
+
+    // Clique numa linha do blame: mostra o commit no grafo.
+    blameGoTo(c) {
+      this.closeView();
+      if (c.uncommitted) return this.select('WIP');
+      this.selectSha(c.sha);
     }
 
     // ---------- histórico de um arquivo ----------
@@ -1278,7 +1348,7 @@
 
     // Ao abrir a guia, e a cada 5 s enquanto ela está em foco.
     async fetchOnOpen({ background } = {}) {
-      if (this.busy || this.fetching) return;
+      if (this.busy || this.fetching || this.app.settings?.autoFetch === false) return;
       if (background && this.skipAutoFetch) return;
       try {
         const remotes = await this.repo.remoteNames();
@@ -1582,6 +1652,7 @@
         c.sha !== this.headSha && { label: 'Comparar com o HEAD', action: () => this.compareRefs(c.sha, 'HEAD', c.sha.slice(0, 7), 'HEAD') },
         { label: 'Copiar SHA', action: () => this.copy(c.sha) },
         { label: 'Copiar mensagem', action: () => this.copy(c.subject) },
+        ...this.webMenu(c.sha),
       ];
     }
   }
@@ -1716,11 +1787,7 @@
       polvo.onWindowFocus(() => this.refreshActive());
       polvo.updates.onStatus((st) => this.onUpdateStatus(st));
       setInterval(() => document.hasFocus() && this.refreshActive(), 10000);
-      setInterval(() => {
-        if (!document.hasFocus() || document.querySelector('.modal-back')) return;
-        const t = this.repoTab();
-        if (t) t.fetchOnOpen({ background: true });
-      }, 5000);
+
       document.addEventListener('keydown', (e) => this.onKey(e));
       window.addEventListener('resize', () => this.active?.kind === 'repo' && V.renderGraphRows(this.active));
     }
@@ -1833,6 +1900,7 @@
       UI.avatars.enabled = s.avatars !== false;
       V.setColumnPrefs(s.columns);
       V.setDiffPrefs(s.diffSplit);
+      this.startAutoFetch();
       for (const p of s.openTabs || []) {
         const v = await polvo.repo.validate(p);
         if (v.ok) this.addTab(new RepoTab(this, v.root), false);
@@ -2055,6 +2123,81 @@
       return this.active && this.active.kind === 'repo' ? this.active : null;
     }
 
+    // Fetch de fundo enquanto a janela está em foco, no intervalo das preferências.
+    startAutoFetch() {
+      clearInterval(this.fetchTimer);
+      const s = this.settings || {};
+      if (s.autoFetch === false) return;
+      this.fetchTimer = setInterval(() => {
+        if (!document.hasFocus() || document.querySelector('.modal-back')) return;
+        const t = this.repoTab();
+        if (t) t.fetchOnOpen({ background: true });
+      }, Math.max(5, Number(s.fetchInterval) || 5) * 1000);
+    }
+
+    // ---------- preferências ----------
+    async openPreferences() {
+      const t = this.repoTab();
+      const cwd = t ? t.repo.root : '.';
+      const cfg = async (args) => ((await polvo.git(cwd, ['config', ...args])).stdout || '').trim();
+      const s = (this.settings = await polvo.settings.get());
+      const [gName, gEmail, defBranch] = await Promise.all([cfg(['--global', 'user.name']), cfg(['--global', 'user.email']), cfg(['--global', 'init.defaultBranch'])]);
+      const [lName, lEmail] = t ? await Promise.all([cfg(['--local', 'user.name']), cfg(['--local', 'user.email'])]) : ['', ''];
+      const fields = [
+        { section: 'Identidade no Git (todos os repositórios)' },
+        { name: 'gName', label: 'Nome', value: gName, placeholder: 'Seu Nome' },
+        { name: 'gEmail', label: 'E-mail', value: gEmail, placeholder: 'voce@exemplo.com' },
+        ...(t
+          ? [
+              { section: `Só neste repositório (${t.repo.name})`, note: 'Deixe vazio para usar a identidade acima.' },
+              { name: 'lName', label: 'Nome', value: lName, placeholder: gName || 'Seu Nome' },
+              { name: 'lEmail', label: 'E-mail', value: lEmail, placeholder: gEmail || 'voce@exemplo.com' },
+            ]
+          : []),
+        { section: 'Fetch automático' },
+        { name: 'autoFetch', label: 'Buscar novidades dos remotos enquanto a janela está em foco', type: 'checkbox', value: s.autoFetch !== false },
+        {
+          name: 'fetchInterval',
+          label: 'Intervalo',
+          value: String(s.fetchInterval || 5),
+          options: [
+            { value: '5', label: 'A cada 5 segundos' },
+            { value: '30', label: 'A cada 30 segundos' },
+            { value: '60', label: 'A cada minuto' },
+            { value: '300', label: 'A cada 5 minutos' },
+          ],
+        },
+        { section: 'Aparência' },
+        { name: 'theme', label: 'Tema', value: document.documentElement.dataset.theme || 'dark', options: [{ value: 'dark', label: 'Escuro' }, { value: 'light', label: 'Claro' }] },
+        { name: 'diffSplit', label: 'Diff', value: s.diffSplit ? 'split' : 'unified', options: [{ value: 'unified', label: 'Unificado' }, { value: 'split', label: 'Lado a lado' }] },
+        { name: 'avatars', label: 'Mostrar fotos de perfil dos autores', type: 'checkbox', value: UI.avatars.enabled },
+        { section: 'Novos repositórios' },
+        { name: 'defBranch', label: 'Nome da branch inicial', value: defBranch, placeholder: 'main' },
+      ];
+      const r = await form('Preferências', fields, { ok: 'Salvar', wide: true });
+      if (!r) return;
+      // git config: vazio remove a chave (volta ao padrão)
+      const setCfg = async (scope, key, val, old) => {
+        if (val.trim() === old) return;
+        if (val.trim()) await polvo.git(cwd, ['config', scope, key, val.trim()]);
+        else await polvo.git(cwd, ['config', scope, '--unset', key]);
+      };
+      await setCfg('--global', 'user.name', r.gName, gName);
+      await setCfg('--global', 'user.email', r.gEmail, gEmail);
+      await setCfg('--global', 'init.defaultBranch', r.defBranch, defBranch);
+      if (t) {
+        await setCfg('--local', 'user.name', r.lName, lName);
+        await setCfg('--local', 'user.email', r.lEmail, lEmail);
+      }
+      document.documentElement.dataset.theme = r.theme;
+      UI.avatars.enabled = r.avatars;
+      V.setDiffPrefs(r.diffSplit === 'split');
+      this.settings = await polvo.settings.set({ theme: r.theme, avatars: r.avatars, diffSplit: r.diffSplit === 'split', autoFetch: r.autoFetch, fetchInterval: Number(r.fetchInterval) });
+      this.startAutoFetch();
+      toast('Preferências salvas');
+      if (this.active) this.active.render();
+    }
+
     toggleTheme() {
       const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
       document.documentElement.dataset.theme = next;
@@ -2080,6 +2223,7 @@
         ['Iniciar repositório...', 'repo:init'],
         ['Nova aba', 'tab:new'],
         ['Reabrir aba fechada', 'tab:reopen'],
+        ['Preferências...', 'app:prefs'],
         ['Alternar tema claro/escuro', 'view:theme'],
         [UI.avatars.enabled ? 'Desligar fotos de perfil' : 'Ligar fotos de perfil', 'view:avatars'],
         ['Atualizar fotos de perfil (limpar cache)', 'view:clearAvatars'],
@@ -2156,6 +2300,8 @@
           return palette(this.commands());
         case 'view:theme':
           return this.toggleTheme();
+        case 'app:prefs':
+          return this.openPreferences();
         case 'view:avatars':
           UI.avatars.enabled = !UI.avatars.enabled;
           polvo.settings.set({ avatars: UI.avatars.enabled });
