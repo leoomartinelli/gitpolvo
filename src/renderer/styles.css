@@ -234,6 +234,21 @@ select:focus {
   min-width: 0;
 }
 
+.repo-missing {
+  width: min(460px, 92%);
+}
+
+.repo-missing h2 {
+  margin: 0 0 6px;
+}
+
+.repo-missing .r-path {
+  font-size: 12px;
+  color: var(--text-dim);
+  word-break: break-all;
+  margin-bottom: 12px;
+}
+
 .welcome h1 {
   margin: 0 0 4px;
   font-size: 30px;

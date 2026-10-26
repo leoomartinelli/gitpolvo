@@ -13,6 +13,11 @@
 
 # Novidades
 
+## Não trava mais quando o repositório é apagado
+
+- Apagar a pasta do repositório ou a pasta .git com a aba aberta não trava mais o GitPolvo: a aba avisa "Repositório não encontrado" e oferece fechar ou tentar de novo
+- O app não abre mais a pasta pai no lugar (por exemplo, a home versionada com dotfiles), o que travava a tela até ao reabrir
+
 ## GitHub dentro do GitPolvo: pull requests, issues e CI
 
 - Seções "Pull requests" e "Issues" na esquerda: abra, comente, aprove, peça mudanças, faça merge, crie PR da branch atual e crie issues sem sair do app

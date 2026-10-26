@@ -902,11 +902,23 @@ ipcMain.handle('cred:canPersist', () => encryptionAvailable());
 ipcMain.handle('settings:get', () => loadSettings());
 ipcMain.handle('settings:set', (_e, patch) => saveSettings(patch));
 
-ipcMain.handle('repo:validate', async (_e, repoPath) => {
+function samePath(a, b) {
+  try {
+    return fs.realpathSync(a) === fs.realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
+// exact: o caminho veio salvo (abas, recentes, workspaces) e precisa continuar
+// sendo a raiz. Se o .git foi apagado, o git sobe até um repositório pai (ex.: a
+// home versionada com dotfiles) e o app abriria esse no lugar, lendo a home inteira.
+ipcMain.handle('repo:validate', async (_e, repoPath, exact) => {
   if (!repoPath || !fs.existsSync(repoPath)) return { ok: false, error: 'Pasta não encontrada' };
   const r = await runGit(repoPath, ['rev-parse', '--show-toplevel']);
   if (r.code !== 0) return { ok: false, error: 'Não é um repositório Git' };
   const root = r.stdout.trim();
+  if (exact && !samePath(root, repoPath)) return { ok: false, error: 'Não é mais um repositório Git (a pasta .git foi apagada?)' };
   addRecent(root);
   return { ok: true, root };
 });

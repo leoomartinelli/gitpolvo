@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('polvo', {
     set: (patch) => ipcRenderer.invoke('settings:set', patch),
   },
   repo: {
-    validate: (p) => ipcRenderer.invoke('repo:validate', p),
+    validate: (p, exact) => ipcRenderer.invoke('repo:validate', p, exact),
     watch: (p) => ipcRenderer.invoke('repo:watch', p),
     unwatch: (p) => ipcRenderer.invoke('repo:unwatch', p),
     init: (dir) => ipcRenderer.invoke('repo:init', dir),

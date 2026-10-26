@@ -50,11 +50,41 @@
     }
 
     dispose() {
+      // a aba sem repositório já parou de observar; "Tentar de novo" cria a nova antes deste dispose
+      if (!this.missing) polvo.repo.unwatch(this.repo.root);
+    }
+
+    // A pasta ou o .git sumiu: para de ler (o git subiria até um repositório pai,
+    // como a home versionada, e travaria a tela) e oferece reabrir ou fechar.
+    markMissing() {
+      if (this.missing) return;
+      this.missing = true;
       polvo.repo.unwatch(this.repo.root);
+      this.page.innerHTML = '';
+      this.page.append(
+        h(
+          'div',
+          { class: 'welcome' },
+          h(
+            'div',
+            { class: 'repo-missing' },
+            h('h2', {}, 'Repositório não encontrado'),
+            h('div', { class: 'r-path' }, this.repo.root),
+            h('div', { class: 'dim' }, 'A pasta foi apagada, movida ou deixou de ser um repositório Git (sem a pasta .git).'),
+            h(
+              'div',
+              { class: 'actions' },
+              h('button', { class: 'btn primary', onclick: () => this.app.closeTab(this) }, 'Fechar aba'),
+              h('button', { class: 'btn', onclick: () => this.app.openRepo(this.repo.root, this) }, 'Tentar de novo')
+            )
+          )
+        )
+      );
     }
 
     // ---------- carga de dados ----------
     async refresh() {
+      if (this.missing) return;
       if (this.refreshing) {
         this.refreshAgain = true;
         return;
@@ -62,6 +92,11 @@
       this.refreshing = true;
       try {
         const r = this.repo;
+        const top = await r.raw(['rev-parse', '--show-toplevel']);
+        if (top.code !== 0 || top.stdout.trim() !== r.root) {
+          this.refreshAgain = false;
+          return this.markMissing();
+        }
         if (!this.filters) this.filters = await this.loadFilters();
         if (!this.pinned) this.pinned = ((await polvo.settings.get()).pinnedBranches || {})[this.repo.root] || [];
         const log = r.log({ limit: this.logLimit, hidden: this.filters.hidden, solo: this.filters.solo });
@@ -1568,7 +1603,7 @@
       if (!name) return toast('Escolha a branch ou digite o nome da nova.', 'error');
       const dir = r.path.trim() || suggest(name);
       const ok = await this.op('Criar worktree', () => this.repo.run(['worktree', 'add', ...(isNew ? ['-b', name, dir] : [dir, name])]), { success: `Worktree de ${name} criado em ${dir}` });
-      if (ok && r.open) this.app.openRepo(dir);
+      if (ok && r.open) this.app.openRepo(dir, null, { subfolder: true });
     }
 
     async removeWorktree(w) {
@@ -2122,7 +2157,7 @@
 
     // Ao abrir a guia, e a cada 5 s enquanto ela está em foco.
     async fetchOnOpen({ background } = {}) {
-      if (this.busy || this.fetching || this.app.settings?.autoFetch === false) return;
+      if (this.missing || this.busy || this.fetching || this.app.settings?.autoFetch === false) return;
       if (background && this.skipAutoFetch) return;
       try {
         const remotes = await this.repo.remoteNames();
@@ -2873,7 +2908,7 @@
       V.setDiffPrefs(s.diffSplit, s.diffIgnoreWs);
       this.startAutoFetch();
       for (const p of s.openTabs || []) {
-        const v = await polvo.repo.validate(p);
+        const v = await polvo.repo.validate(p, true);
         if (v.ok) this.addTab(new RepoTab(this, v.root), false);
       }
       if (!this.tabs.length) this.newTab();
@@ -3015,13 +3050,15 @@
       }
     }
 
-    async openRepo(p, replaceTab) {
-      const v = await polvo.repo.validate(p);
+    // subfolder: aceita uma pasta dentro do repositório (escolhida pelo usuário);
+    // caminhos salvos (recentes, workspaces, worktrees) precisam ser a raiz.
+    async openRepo(p, replaceTab, { subfolder = false } = {}) {
+      const v = await polvo.repo.validate(p, !subfolder);
       if (!v.ok) {
         toast(`${p}\n${v.error}`, 'error');
         return;
       }
-      const existing = this.tabs.find((t) => t.kind === 'repo' && t.repo.root === v.root);
+      const existing = this.tabs.find((t) => t.kind === 'repo' && t.repo.root === v.root && !t.missing);
       if (existing) {
         if (replaceTab && replaceTab !== existing) this.closeTab(replaceTab);
         return this.activate(existing);
@@ -3042,7 +3079,7 @@
 
     async commandOpen(replace) {
       const dir = await polvo.pickDir('Abrir repositório');
-      if (dir) this.openRepo(dir, replace || this.welcomeOrNull());
+      if (dir) this.openRepo(dir, replace || this.welcomeOrNull(), { subfolder: true });
     }
 
     // Com conta do GitHub, primeiro oferece a lista de repositórios dela.
@@ -3104,7 +3141,7 @@
     }
 
     repoTab() {
-      return this.active && this.active.kind === 'repo' ? this.active : null;
+      return this.active && this.active.kind === 'repo' && !this.active.missing ? this.active : null;
     }
 
     // Fetch de fundo enquanto a janela está em foco, no intervalo das preferências.
