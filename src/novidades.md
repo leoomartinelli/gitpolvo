@@ -13,6 +13,13 @@
 
 # Novidades
 
+## Projetos e abas que mudam de lugar
+
+- Projetos: agrupe repositórios (ex.: trabalho, pessoal) pelo botão "🗂" à esquerda das abas. Trocar de projeto fecha as abas do atual e abre as do outro, do jeito que estavam: mesma ordem e mesma aba ativa
+- Repositório aberto com um projeto ativo entra nele; "Gerenciar projetos..." renomeia, exclui e tira repositórios (nada é apagado do disco)
+- O último projeto usado volta ao abrir o GitPolvo. Os workspaces salvos viraram projetos
+- Arraste as abas para mudar a ordem, ou use o botão direito na aba ("Mover para a esquerda/direita") e Ctrl+Shift+PageUp/PageDown
+
 ## Não trava mais quando o repositório é apagado
 
 - Apagar a pasta do repositório ou a pasta .git com a aba aberta não trava mais o GitPolvo: a aba avisa "Repositório não encontrado" e oferece fechar ou tentar de novo

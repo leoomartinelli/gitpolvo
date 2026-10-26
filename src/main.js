@@ -515,6 +515,9 @@ function buildMenu() {
         { label: 'Clonar repositório...', accelerator: 'CmdOrCtrl+N', click: cmd('repo:clone') },
         { label: 'Iniciar repositório...', accelerator: 'CmdOrCtrl+I', click: cmd('repo:init') },
         { type: 'separator' },
+        { label: 'Novo projeto...', click: cmd('project:new') },
+        { label: 'Gerenciar projetos...', click: cmd('project:manage') },
+        { type: 'separator' },
         { label: 'Abrir no gerenciador de arquivos', click: cmd('repo:reveal') },
         { label: 'Abrir terminal externo', accelerator: 'Alt+T', click: cmd('repo:terminal') },
         { type: 'separator' },
@@ -910,7 +913,7 @@ function samePath(a, b) {
   }
 }
 
-// exact: o caminho veio salvo (abas, recentes, workspaces) e precisa continuar
+// exact: o caminho veio salvo (abas, recentes, projetos) e precisa continuar
 // sendo a raiz. Se o .git foi apagado, o git sobe até um repositório pai (ex.: a
 // home versionada com dotfiles) e o app abriria esse no lugar, lendo a home inteira.
 ipcMain.handle('repo:validate', async (_e, repoPath, exact) => {
