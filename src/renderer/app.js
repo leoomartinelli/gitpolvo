@@ -2672,26 +2672,31 @@
           )
         );
       }
-      const spaces = h('div', {});
-      for (const w of s.workspaces || [])
-        spaces.append(
+      const projects = h('div', {});
+      for (const p of s.projects || [])
+        projects.append(
           h(
             'div',
             {
               class: 'recent-item',
-              title: w.repos.join('\n'),
-              onclick: () => this.app.openWorkspace(w),
+              title: p.repos.join('\n'),
+              onclick: () => this.app.switchProject(p.name),
               oncontextmenu: (e) => {
                 e.preventDefault();
                 UI.showMenu(e.clientX, e.clientY, [
-                  { label: 'Abrir todos', action: () => this.app.openWorkspace(w) },
-                  { label: 'Substituir pelas abas abertas...', action: () => this.app.saveWorkspace() },
-                  { label: 'Excluir workspace', danger: true, action: () => this.app.deleteWorkspace(w) },
+                  { label: 'Abrir projeto', action: () => this.app.switchProject(p.name) },
+                  { label: 'Gerenciar projetos...', action: () => this.app.manageProjects() },
+                  { label: 'Excluir projeto', danger: true, action: () => this.app.deleteProject(p) },
                 ]);
               },
             },
             h('span', {}, '🗂'),
-            h('div', { class: 'r-text' }, h('div', { class: 'r-name' }, w.name), h('div', { class: 'r-path' }, w.repos.map((p) => p.split('/').pop()).join(' · ')))
+            h(
+              'div',
+              { class: 'r-text' },
+              h('div', { class: 'r-name' }, p.name, p.name === this.app.project ? h('span', { class: 'dim small' }, '  (atual)') : null),
+              h('div', { class: 'r-path' }, p.repos.map((r) => r.split('/').pop()).join(' · ') || 'sem repositórios')
+            )
           )
         );
       this.page.innerHTML = '';
@@ -2718,10 +2723,10 @@
             h(
               'div',
               {},
-              (s.workspaces || []).length ? [h('h3', {}, 'Workspaces'), spaces] : null,
+              (s.projects || []).length ? [h('h3', {}, 'Projetos'), projects] : null,
               h('h3', {}, 'Recentes'),
               recent,
-              h('div', { class: 'dim small welcome-hint' }, 'Dica: abra vários repositórios em abas e use "Salvar abas abertas como workspace" na paleta (Ctrl+P) para abrir todos juntos depois.')
+              h('div', { class: 'dim small welcome-hint' }, 'Dica: agrupe repositórios em projetos pelo botão "🗂" à esquerda das abas; trocar de projeto troca o conjunto de abas abertas.')
             )
           )
         )
@@ -2783,6 +2788,8 @@
       this.tabsEl = document.getElementById('tabs');
       this.workspace = document.getElementById('workspace');
       document.getElementById('tab-add').onclick = () => this.newTab();
+      this.projectBtn = document.getElementById('project-btn');
+      this.projectBtn.onclick = () => this.projectMenu();
       polvo.onMenu((name) => this.command(name));
       polvo.onRepoChanged((root) => {
         for (const t of this.tabs) if (t.kind === 'repo' && t.repo.root === root && !t.busy) t.refresh();
@@ -2907,12 +2914,14 @@
       V.setColumnPrefs(s.columns);
       V.setDiffPrefs(s.diffSplit, s.diffIgnoreWs);
       this.startAutoFetch();
-      for (const p of s.openTabs || []) {
-        const v = await polvo.repo.validate(p, true);
-        if (v.ok) this.addTab(new RepoTab(this, v.root), false);
+      // os workspaces antigos viram projetos
+      if (!s.projects && s.workspaces) {
+        s.projects = s.workspaces.map((w) => ({ name: w.name, repos: [...w.repos] }));
+        polvo.settings.set({ projects: s.projects, workspaces: undefined });
       }
-      if (!this.tabs.length) this.newTab();
-      else this.activate(this.tabs[Math.min(s.activeTab || 0, this.tabs.length - 1)]);
+      this.project = this.findProject(s.currentProject) ? s.currentProject : null;
+      this.renderProject();
+      await this.loadTabs(this.savedTabs());
       await this.maybeOpenWhatsNew();
     }
 
@@ -2975,9 +2984,42 @@
       this.addTab(new NotesTab(this, md || 'Nenhuma nota de versão ainda.', info.version));
     }
 
+    // Sem projeto, as abas ficam em openTabs/activeTab; num projeto, dentro dele.
     persistTabs() {
-      const repos = this.tabs.filter((t) => t.kind === 'repo').map((t) => t.repo.root);
-      polvo.settings.set({ openTabs: repos, activeTab: Math.max(0, this.tabs.filter((t) => t.kind === 'repo').indexOf(this.active)) });
+      if (this.switching || !this.settings) return;
+      const repoTabs = this.tabs.filter((t) => t.kind === 'repo');
+      const openTabs = repoTabs.map((t) => t.repo.root);
+      const activeTab = Math.max(0, repoTabs.indexOf(this.active));
+      const p = this.currentProject();
+      if (!p) {
+        Object.assign(this.settings, { openTabs, activeTab });
+        return polvo.settings.set({ openTabs, activeTab });
+      }
+      Object.assign(p, { openTabs, activeTab });
+      // repositório aberto dentro do projeto passa a fazer parte dele
+      for (const r of openTabs) if (!p.repos.includes(r)) p.repos.push(r);
+      polvo.settings.set({ projects: this.settings.projects });
+    }
+
+    savedTabs() {
+      const p = this.currentProject();
+      // projeto nunca aberto: abre todos os repositórios dele
+      if (p) return { paths: p.openTabs || p.repos, active: p.activeTab };
+      return { paths: this.settings.openTabs || [], active: this.settings.activeTab };
+    }
+
+    async loadTabs({ paths, active }) {
+      this.switching = true;
+      try {
+        for (const p of paths) {
+          const v = await polvo.repo.validate(p, true);
+          if (v.ok && !this.tabs.some((t) => t.kind === 'repo' && t.repo.root === v.root)) this.addTab(new RepoTab(this, v.root), false);
+        }
+      } finally {
+        this.switching = false;
+      }
+      if (!this.tabs.length) this.newTab();
+      else this.activate(this.tabs[Math.min(active || 0, this.tabs.length - 1)]);
     }
 
     addTab(tab, activate = true) {
@@ -3020,38 +3062,104 @@
       this.persistTabs();
     }
 
+    moveTab(tab, to) {
+      const from = this.tabs.indexOf(tab);
+      to = Math.max(0, Math.min(to, this.tabs.length - 1));
+      if (from < 0 || from === to) return;
+      this.tabs.splice(from, 1);
+      this.tabs.splice(to, 0, tab);
+      this.renderTabs();
+      this.persistTabs();
+    }
+
+    tabMenu(e, t) {
+      e.preventDefault();
+      const i = this.tabs.indexOf(t);
+      UI.showMenu(e.clientX, e.clientY, [
+        { label: 'Mover para a esquerda', disabled: i === 0, action: () => this.moveTab(t, i - 1) },
+        { label: 'Mover para a direita', disabled: i === this.tabs.length - 1, action: () => this.moveTab(t, i + 1) },
+        '-',
+        { label: 'Fechar aba', action: () => this.closeTab(t) },
+        { label: 'Fechar as outras abas', disabled: this.tabs.length < 2, action: () => this.tabs.filter((o) => o !== t).forEach((o) => this.closeTab(o)) },
+      ]);
+    }
+
+    // Arrastar e soltar: a aba cai antes ou depois da que está sob o mouse,
+    // conforme o lado; a linha de destaque mostra onde.
+    tabDragEvents(t, el) {
+      const side = (e) => {
+        const r = el.getBoundingClientRect();
+        return e.clientX < r.left + r.width / 2 ? 'before' : 'after';
+      };
+      const clear = () => el.classList.remove('drop-before', 'drop-after');
+      return {
+        dragstart: (e) => {
+          this.dragTab = t;
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', '');
+          el.classList.add('dragging');
+        },
+        dragend: () => {
+          this.dragTab = null;
+          for (const x of this.tabsEl.children) x.classList.remove('dragging', 'drop-before', 'drop-after');
+        },
+        dragover: (e) => {
+          if (!this.dragTab) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          clear();
+          if (this.dragTab !== t) el.classList.add('drop-' + side(e));
+        },
+        dragleave: clear,
+        drop: (e) => {
+          const drag = this.dragTab;
+          if (!drag) return;
+          e.preventDefault();
+          // o renderTabs recria as abas e o dragend pode não chegar
+          this.dragTab = null;
+          clear();
+          if (drag === t) return;
+          let to = this.tabs.indexOf(t) + (side(e) === 'after' ? 1 : 0);
+          if (this.tabs.indexOf(drag) < to) to--;
+          this.moveTab(drag, to);
+        },
+      };
+    }
+
     renderTabs() {
       this.tabsEl.innerHTML = '';
       for (const t of this.tabs) {
-        this.tabsEl.append(
+        const el = h(
+          'div',
+          {
+            class: 'tab' + (t === this.active ? ' active' : ''),
+            title: t.kind === 'repo' ? t.repo.root : '',
+            draggable: 'true',
+            onclick: () => this.activate(t),
+            onauxclick: (e) => e.button === 1 && this.closeTab(t),
+            oncontextmenu: (e) => this.tabMenu(e, t),
+          },
+          h('span', {}, t.kind === 'repo' ? '⑂' : t.kind === 'notes' ? '✦' : '⌂'),
+          h('span', { class: 'tab-name' }, t.title),
           h(
-            'div',
+            'button',
             {
-              class: 'tab' + (t === this.active ? ' active' : ''),
-              title: t.kind === 'repo' ? t.repo.root : '',
-              onclick: () => this.activate(t),
-              onauxclick: (e) => e.button === 1 && this.closeTab(t),
-            },
-            h('span', {}, t.kind === 'repo' ? '⑂' : t.kind === 'notes' ? '✦' : '⌂'),
-            h('span', { class: 'tab-name' }, t.title),
-            h(
-              'button',
-              {
-                class: 'icon-btn tab-close',
-                onclick: (e) => {
-                  e.stopPropagation();
-                  this.closeTab(t);
-                },
+              class: 'icon-btn tab-close',
+              onclick: (e) => {
+                e.stopPropagation();
+                this.closeTab(t);
               },
-              '×'
-            )
+            },
+            '×'
           )
         );
+        for (const [name, fn] of Object.entries(this.tabDragEvents(t, el))) el.addEventListener(name, fn);
+        this.tabsEl.append(el);
       }
     }
 
     // subfolder: aceita uma pasta dentro do repositório (escolhida pelo usuário);
-    // caminhos salvos (recentes, workspaces, worktrees) precisam ser a raiz.
+    // caminhos salvos (recentes, projetos, worktrees) precisam ser a raiz.
     async openRepo(p, replaceTab, { subfolder = false } = {}) {
       const v = await polvo.repo.validate(p, !subfolder);
       if (!v.ok) {
@@ -3198,30 +3306,173 @@
       if (go) polvo.openExternal('https://github.com/settings/ssh/new');
     }
 
-    // ---------- workspaces ----------
-    // Grupos de repositórios abertos juntos, guardados nas configurações.
-    async saveWorkspace() {
-      const repos = this.tabs.filter((t) => t.kind === 'repo').map((t) => t.repo.root);
-      if (!repos.length) return toast('Abra os repositórios do workspace em abas primeiro.');
-      const s = (this.settings = await polvo.settings.get());
-      const list = s.workspaces || [];
-      const name = await prompt('Salvar workspace', 'Nome', '', { ok: 'Salvar', message: `${repos.length} repositório(s): ${repos.map((p) => p.split('/').pop()).join(', ')}.\nUse um nome que já existe para substituir.` });
+    // ---------- projetos ----------
+    // Grupos de repositórios: trocar de projeto fecha as abas do atual e abre
+    // as do outro. Cada projeto lembra as abas abertas, a ordem e a ativa.
+    projects() {
+      return this.settings?.projects || [];
+    }
+
+    findProject(name) {
+      return name == null ? null : this.projects().find((p) => p.name === name) || null;
+    }
+
+    currentProject() {
+      return this.findProject(this.project);
+    }
+
+    async saveProjects(list) {
+      this.settings = await polvo.settings.set({ projects: [...list].sort((a, b) => a.name.localeCompare(b.name)) });
+      this.renderProject();
+      this.refreshWelcome();
+    }
+
+    renderProject() {
+      const btn = this.projectBtn;
+      btn.innerHTML = '';
+      btn.classList.toggle('on', !!this.project);
+      btn.append(h('span', {}, '🗂'), h('span', { class: 'project-name' }, this.project || 'Sem projeto'), h('span', {}, '▾'));
+    }
+
+    projectMenu() {
+      const r = this.projectBtn.getBoundingClientRect();
+      // espaços comuns no começo somem no HTML: o em-space segura o alinhamento
+      const mark = (on, label) => (on ? '✓ ' : '\u2003') + label;
+      UI.showMenu(r.left, r.bottom, [
+        ...this.projects().map((p) => ({ label: mark(p.name === this.project, p.name), action: () => this.switchProject(p.name) })),
+        { label: mark(!this.project, 'Sem projeto'), action: () => this.switchProject(null) },
+        '-',
+        { label: 'Novo projeto...', action: () => this.createProject() },
+        { label: 'Gerenciar projetos...', disabled: !this.projects().length, action: () => this.manageProjects() },
+      ]);
+    }
+
+    async switchProject(name) {
+      if (this.switching || name === this.project) return;
+      this.persistTabs();
+      for (const t of this.tabs) t.dispose();
+      this.tabs = [];
+      this.closed = [];
+      this.active = null;
+      this.workspace.innerHTML = '';
+      this.project = name;
+      polvo.settings.set({ currentProject: name });
+      this.renderProject();
+      await this.loadTabs(this.savedTabs());
+    }
+
+    async createProject() {
+      const repoTabs = this.tabs.filter((t) => t.kind === 'repo');
+      const r = await form(
+        'Novo projeto',
+        [
+          { name: 'name', label: 'Nome', placeholder: 'ex.: trabalho' },
+          repoTabs.length ? { name: 'take', label: `Levar as abas abertas (${repoTabs.length}) para o projeto`, type: 'checkbox', value: !this.project } : null,
+        ].filter(Boolean),
+        { ok: 'Criar', message: 'Um projeto agrupa repositórios. Trocar de projeto (no botão à esquerda das abas) troca o conjunto de abas abertas.' }
+      );
+      const name = r && r.name.trim();
       if (!name) return;
-      const next = [...list.filter((w) => w.name !== name), { name, repos }].sort((a, b) => a.name.localeCompare(b.name));
-      this.settings = await polvo.settings.set({ workspaces: next });
-      toast(`Workspace "${name}" salvo`);
-      this.refreshWelcome();
+      if (this.findProject(name)) return toast(`Já existe um projeto "${name}".`, 'error');
+      const repos = r.take ? repoTabs.map((t) => t.repo.root) : [];
+      const fromNone = r.take && !this.project;
+      await this.saveProjects([...this.projects(), { name, repos, openTabs: repos, activeTab: Math.max(0, repoTabs.indexOf(this.active)) }]);
+      await this.switchProject(name);
+      // as abas foram para o projeto: "Sem projeto" fica vazio
+      if (fromNone) {
+        Object.assign(this.settings, { openTabs: [], activeTab: 0 });
+        polvo.settings.set({ openTabs: [], activeTab: 0 });
+      }
+      toast(`Projeto "${name}" criado`);
     }
 
-    async openWorkspace(ws) {
-      for (const p of ws.repos) await this.openRepo(p);
+    async renameProject(p) {
+      const name = (await prompt('Renomear projeto', 'Nome', p.name, { ok: 'Renomear' }))?.trim();
+      if (!name || name === p.name) return;
+      if (this.findProject(name)) return toast(`Já existe um projeto "${name}".`, 'error');
+      if (this.project === p.name) {
+        this.project = name;
+        polvo.settings.set({ currentProject: name });
+      }
+      await this.saveProjects(this.projects().map((x) => (x === p ? { ...x, name } : x)));
     }
 
-    async deleteWorkspace(ws) {
-      if (!(await confirmBox('Excluir workspace', `Excluir o workspace "${ws.name}"? Os repositórios não são apagados.`, 'Excluir'))) return;
-      const s = await polvo.settings.get();
-      this.settings = await polvo.settings.set({ workspaces: (s.workspaces || []).filter((w) => w.name !== ws.name) });
-      this.refreshWelcome();
+    async deleteProject(p) {
+      if (!(await confirmBox('Excluir projeto', `Excluir o projeto "${p.name}"? Os repositórios não são apagados do disco.`, 'Excluir'))) return false;
+      if (this.project === p.name) await this.switchProject(null);
+      await this.saveProjects(this.projects().filter((x) => x.name !== p.name));
+      return true;
+    }
+
+    async addRepoToProject(p) {
+      const dir = await polvo.pickDir(`Adicionar repositório ao projeto "${p.name}"`);
+      if (!dir) return;
+      const v = await polvo.repo.validate(dir, false);
+      if (!v.ok) return toast(`${dir}\n${v.error}`, 'error');
+      if (p.name === this.project) return this.openRepo(v.root);
+      const add = (list) => (list.includes(v.root) ? list : [...list, v.root]);
+      await this.saveProjects(this.projects().map((x) => (x === p ? { ...x, repos: add(x.repos), openTabs: x.openTabs && add(x.openTabs) } : x)));
+    }
+
+    async removeRepoFromProject(p, root) {
+      const drop = (list) => list && list.filter((r) => r !== root);
+      await this.saveProjects(this.projects().map((x) => (x === p ? { ...x, repos: drop(x.repos), openTabs: drop(x.openTabs) } : x)));
+      // a aba aberta o colocaria de volta no projeto
+      if (p.name === this.project) this.tabs.filter((t) => t.kind === 'repo' && t.repo.root === root).forEach((t) => this.closeTab(t));
+    }
+
+    manageProjects() {
+      openModal((close) => {
+        const list = h('div', { class: 'project-list' });
+        const act = (fn) => async () => (await fn(), render());
+        const render = () => {
+          list.innerHTML = '';
+          if (!this.projects().length) list.append(h('div', { class: 'dim' }, 'Nenhum projeto ainda.'));
+          for (const p of this.projects()) {
+            const current = p.name === this.project;
+            list.append(
+              h(
+                'div',
+                { class: 'project-card' + (current ? ' current' : '') },
+                h(
+                  'div',
+                  { class: 'project-head' },
+                  h('span', {}, '🗂'),
+                  h('span', { class: 'project-title' }, p.name, current ? h('span', { class: 'dim small' }, '  (atual)') : null),
+                  current ? null : h('button', { class: 'btn small', onclick: () => (close(), this.switchProject(p.name)) }, 'Abrir'),
+                  h('button', { class: 'btn small', onclick: act(() => this.addRepoToProject(p)) }, '+ Repositório'),
+                  h('button', { class: 'btn small', onclick: act(() => this.renameProject(p)) }, 'Renomear'),
+                  h('button', { class: 'btn small', onclick: act(() => this.deleteProject(p)) }, 'Excluir')
+                ),
+                p.repos.length ? null : h('div', { class: 'project-repo dim small' }, 'Sem repositórios. Abra um com o projeto ativo ou use "+ Repositório".'),
+                p.repos.map((root) =>
+                  h(
+                    'div',
+                    { class: 'project-repo' },
+                    h('span', {}, root.split('/').filter(Boolean).pop()),
+                    h('span', { class: 'r-path', title: root }, root),
+                    h('button', { class: 'icon-btn', title: 'Tirar do projeto (não apaga do disco)', onclick: act(() => this.removeRepoFromProject(p, root)) }, '✕')
+                  )
+                )
+              )
+            );
+          }
+        };
+        render();
+        return h(
+          'div',
+          { class: 'modal wide' },
+          h('h2', {}, 'Projetos'),
+          h('div', { class: 'msg dim' }, 'Repositórios abertos com um projeto ativo entram nele automaticamente. Tirar um repositório do projeto ou excluir o projeto não apaga nada do disco.'),
+          list,
+          h(
+            'div',
+            { class: 'actions' },
+            h('button', { class: 'btn', onclick: () => (close(), this.createProject()) }, 'Novo projeto...'),
+            h('button', { class: 'btn primary', onclick: () => close() }, 'Fechar')
+          )
+        );
+      });
     }
 
     refreshWelcome() {
@@ -3366,7 +3617,8 @@
         ['Reabrir aba fechada', 'tab:reopen'],
         ['Preferências...', 'app:prefs'],
         ['Perfis de identidade...', 'app:profiles'],
-        ['Salvar abas abertas como workspace...', 'app:saveWorkspace'],
+        ['Novo projeto...', 'project:new'],
+        ['Gerenciar projetos...', 'project:manage'],
         ['Chave SSH para o GitHub...', 'app:sshKey'],
         ['Alternar tema claro/escuro', 'view:theme'],
         [UI.avatars.enabled ? 'Desligar fotos de perfil' : 'Ligar fotos de perfil', 'view:avatars'],
@@ -3417,7 +3669,8 @@
         for (const b of t.data.refs.local) if (!b.current) items.push({ label: `Checkout: ${b.name}`, group: 'branch', action: () => t.checkout(b.name) });
       }
       for (const p of this.settings?.recent || []) items.push({ label: `Abrir: ${p.split('/').pop()}`, group: p, action: () => this.openRepo(p) });
-      for (const w of this.settings?.workspaces || []) items.push({ label: `Abrir workspace: ${w.name}`, group: `${w.repos.length} repositório(s)`, action: () => this.openWorkspace(w) });
+      for (const p of this.projects()) if (p.name !== this.project) items.push({ label: `Projeto: ${p.name}`, group: `${p.repos.length} repositório(s)`, action: () => this.switchProject(p.name) });
+      if (this.project) items.push({ label: 'Projeto: sem projeto', group: 'projeto', action: () => this.switchProject(null) });
       return items;
     }
 
@@ -3460,8 +3713,10 @@
           return this.openPreferences();
         case 'app:profiles':
           return this.editProfiles();
-        case 'app:saveWorkspace':
-          return this.saveWorkspace();
+        case 'project:new':
+          return this.createProject();
+        case 'project:manage':
+          return this.manageProjects();
         case 'app:sshKey':
           return this.sshKeySetup();
         case 'view:avatars':
@@ -3581,6 +3836,10 @@
         this.activate(this.tabs[(i + (e.shiftKey ? -1 : 1) + n) % n]);
         return;
       }
+      if (mod && e.shiftKey && (e.key === 'PageUp' || e.key === 'PageDown') && this.active) {
+        e.preventDefault();
+        return this.moveTab(this.active, this.tabs.indexOf(this.active) + (e.key === 'PageUp' ? -1 : 1));
+      }
       if (mod && /^[1-9]$/.test(e.key)) {
         const tab = this.tabs[+e.key - 1];
         if (tab) this.activate(tab);
@@ -3619,6 +3878,7 @@
         ['Ctrl+O / Ctrl+N / Ctrl+I', 'Abrir / clonar / iniciar repositório'],
         ['Ctrl+T / Ctrl+W', 'Nova aba / fechar aba'],
         ['Ctrl+Tab, Ctrl+1..9', 'Trocar de aba'],
+        ['Ctrl+Shift+PageUp / PageDown', 'Mover a aba para a esquerda / direita'],
         ['Ctrl+L', 'Fetch'],
         ['Ctrl+B', 'Nova branch'],
         ['Ctrl+Shift+S / U', 'Stage / unstage em tudo'],
