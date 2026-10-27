@@ -19,6 +19,7 @@
 - Repositório aberto com um projeto ativo entra nele; "Gerenciar projetos..." renomeia, exclui e tira repositórios (nada é apagado do disco)
 - O último projeto usado volta ao abrir o GitPolvo. Os workspaces salvos viraram projetos
 - Arraste as abas para mudar a ordem, ou use o botão direito na aba ("Mover para a esquerda/direita") e Ctrl+Shift+PageUp/PageDown
+- A mensagem do commit no painel da direita abre sempre num tamanho compacto (arraste o canto para aumentar) e não mostra mais "null" em commits sem CI
 
 ## Não trava mais quando o repositório é apagado
 

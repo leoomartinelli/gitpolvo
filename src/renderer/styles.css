@@ -2078,7 +2078,8 @@ html[data-theme='light'] .badge.head {
 
 /* ---------- painel do commit mais próximo do original ---------- */
 .detail-msg {
-  min-height: 130px;
+  height: 130px;
+  min-height: 60px;
   max-height: 60vh;
   overflow: auto;
   resize: vertical;
