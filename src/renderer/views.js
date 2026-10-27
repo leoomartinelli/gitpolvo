@@ -1807,7 +1807,7 @@
     });
     box.append(
       h('div', { class: 'detail-msg' }, h('div', { class: 'subject' }, issueLinks(tab, subject)), bodyText ? h('div', { class: 'body' }, issueLinks(tab, bodyText)) : null),
-      tab.selectedIsStash ? null : ciList(tab.ci.get(d.sha)),
+      tab.selectedIsStash ? '' : ciList(tab.ci.get(d.sha)) || '',
       h('div', { class: 'grab' }),
       h(
         'div',

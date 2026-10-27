@@ -13,6 +13,10 @@
 
 # Novidades
 
+## Mensagem do commit em tamanho compacto
+
+- A mensagem do commit no painel da direita abre sempre num tamanho compacto (arraste o canto para aumentar) e não mostra mais "null" em commits sem CI
+
 ## Projetos e abas que mudam de lugar
 
 - Projetos: agrupe repositórios (ex.: trabalho, pessoal) pelo botão "🗂" à esquerda das abas. Trocar de projeto fecha as abas do atual e abre as do outro, do jeito que estavam: mesma ordem e mesma aba ativa
