@@ -13,6 +13,11 @@
 
 # Novidades
 
+## Árvore de pastas na hora de commitar
+
+- O painel de commit ganhou o seletor Caminho / Árvore, como na navegação dos commits. Na árvore, cada pasta tem um botão para fazer stage ou unstage de tudo dentro dela
+- No diff, os sinais + e - não saem mais do lugar ao rolar: ficam presos à linha deles
+
 ## Mensagem do commit em tamanho compacto
 
 - A mensagem do commit no painel da direita abre sempre num tamanho compacto (arraste o canto para aumentar) e não mostra mais "null" em commits sem CI

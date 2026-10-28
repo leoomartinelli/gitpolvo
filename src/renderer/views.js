@@ -1280,7 +1280,9 @@
   }
 
   // Agrupa caminhos em pastas; pastas recolhíveis, estado guardado na aba.
-  function renderTree(tab, container, files, sel, open, menu) {
+  // keyPrefix separa listas da mesma aba (preparados e não preparados);
+  // dirActions(paths) devolve os botões de uma pasta, com os arquivos dela.
+  function renderTree(tab, container, files, makeRow, { keyPrefix = '', dirActions } = {}) {
     const root = { dirs: new Map(), files: [] };
     for (const f of files) {
       const parts = f.path.split('/');
@@ -1291,6 +1293,7 @@
       }
       node.files.push({ ...f, label: parts[parts.length - 1] });
     }
+    const pathsIn = (node) => [...node.files.map((f) => f.path), ...[...node.dirs.values()].flatMap(pathsIn)];
     const walk = (node, prefix, depth) => {
       for (const [name, child] of node.dirs) {
         // compacta pastas com um único filho: "src/main/java"
@@ -1301,7 +1304,7 @@
           label += '/' + n2;
           cur = c2;
         }
-        const key = prefix + label;
+        const key = keyPrefix + prefix + label;
         const collapsed = tab.treeCollapsed.has(key);
         container.append(
           h(
@@ -1317,18 +1320,48 @@
             },
             h('span', { class: 'caret' }, collapsed ? '▸' : '▾'),
             h('span', { class: 'bi folder', html: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M1.5 4h5l1.5 1.5h6.5v7.5h-13z" fill="currentColor"/></svg>' }),
-            h('span', { class: 'fname' }, label)
+            h('span', { class: 'fname' }, label),
+            dirActions ? h('span', { class: 'fact', onclick: (e) => e.stopPropagation() }, dirActions(pathsIn(cur))) : null
           )
         );
-        if (!collapsed) walk(cur, key + '/', depth + 1);
+        if (!collapsed) walk(cur, prefix + label + '/', depth + 1);
       }
       for (const f of node.files) {
-        const row = fileRow(f, { selected: sel === f.path, onclick: () => open(f), oncontextmenu: menu && menu(f) });
+        const row = makeRow(f);
         row.style.paddingLeft = 8 + depth * 14 + 'px';
         container.append(row);
       }
     };
     walk(root, '', 0);
+  }
+
+  // Lista de arquivos em caminho ou árvore, conforme tab.fileView.mode
+  function fileList(tab, container, files, makeRow, treeOpts) {
+    if (tab.fileView.mode === 'tree') renderTree(tab, container, files, makeRow, treeOpts);
+    else container.append(...files.map(makeRow));
+    return container;
+  }
+
+  function fileViewSeg(tab) {
+    const seg = (mode, label, svgText) =>
+      h(
+        'button',
+        {
+          class: 'seg-btn' + (tab.fileView.mode === mode ? ' active' : ''),
+          onclick: () => {
+            tab.fileView.mode = mode;
+            renderRight(tab);
+          },
+        },
+        h('span', { class: 'bi', html: svgText }),
+        label
+      );
+    return h(
+      'div',
+      { class: 'seg' },
+      seg('path', 'Caminho', '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.6"/></svg>'),
+      seg('tree', 'Árvore', '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M3 2v11h4M3 7h4" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="5" width="6" height="4" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="8" y="11" width="6" height="4" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>')
+    );
   }
 
   function renderRight(tab) {
@@ -1494,7 +1527,9 @@
       );
     }
 
+    const dirBtn = (label, run) => (paths) => h('button', { class: 'btn small', title: `${label} nos ${paths.length} arquivo(s) da pasta`, onclick: () => run(paths) }, label);
     scrollBox.append(
+      h('div', { class: 'file-tools' }, h('span', { class: 'grow' }), fileViewSeg(tab)),
       h(
         'h4',
         {},
@@ -1503,11 +1538,12 @@
         st.unstaged.length ? h('button', { class: 'btn small danger', onclick: () => tab.discardAll() }, 'Descartar tudo') : null,
         st.unstaged.length ? h('button', { class: 'btn small', onclick: () => tab.stageAll() }, 'Stage em tudo') : null
       ),
-      h(
-        'div',
-        { class: 'file-list' },
-        st.unstaged.length
-          ? st.unstaged.map((f) =>
+      st.unstaged.length
+        ? fileList(
+            tab,
+            h('div', { class: 'file-list' }),
+            st.unstaged,
+            (f) =>
               fileRow(f, {
                 selected: isSel('unstaged', f.path),
                 onclick: () => tab.openDiff(f.untracked ? 'untracked' : 'unstaged', f.path),
@@ -1540,10 +1576,10 @@
                   },
                   'Stage'
                 ),
-              })
-            )
-          : h('div', { class: 'file-row dim' }, 'Nenhuma alteração')
-      ),
+              }),
+            { keyPrefix: 'wip-u:', dirActions: dirBtn('Stage', (paths) => tab.stage(paths)) }
+          )
+        : h('div', { class: 'file-list' }, h('div', { class: 'file-row dim' }, 'Nenhuma alteração')),
       h(
         'h4',
         {},
@@ -1551,11 +1587,12 @@
         h('span', { class: 'grow' }),
         st.staged.length ? h('button', { class: 'btn small', onclick: () => tab.unstageAll() }, 'Unstage em tudo') : null
       ),
-      h(
-        'div',
-        { class: 'file-list' },
-        st.staged.length
-          ? st.staged.map((f) =>
+      st.staged.length
+        ? fileList(
+            tab,
+            h('div', { class: 'file-list' }),
+            st.staged,
+            (f) =>
               fileRow(f, {
                 selected: isSel('staged', f.path),
                 onclick: () => tab.openDiff('staged', f.path),
@@ -1582,10 +1619,10 @@
                   },
                   'Unstage'
                 ),
-              })
-            )
-          : h('div', { class: 'file-row dim' }, 'Nada preparado para commit')
-      )
+              }),
+            { keyPrefix: 'wip-s:', dirActions: dirBtn('Unstage', (paths) => tab.unstage(paths)) }
+          )
+        : h('div', { class: 'file-list' }, h('div', { class: 'file-row dim' }, 'Nada preparado para commit'))
     );
 
     const draft = tab.commitDraft;
@@ -1783,22 +1820,8 @@
           { label: 'Copiar caminho', action: () => navigator.clipboard.writeText(f.path) },
         ]);
       };
-      if (fv.mode === 'tree') renderTree(tab, listBox, files, sel, open, menu);
-      else listBox.append(...files.map((f) => fileRow(f, { selected: sel === f.path, onclick: () => open(f), oncontextmenu: menu(f) })));
+      fileList(tab, listBox, files, (f) => fileRow(f, { selected: sel === f.path, onclick: () => open(f), oncontextmenu: menu(f) }));
     };
-    const seg = (mode, label, svgText) =>
-      h(
-        'button',
-        {
-          class: 'seg-btn' + (fv.mode === mode ? ' active' : ''),
-          onclick: () => {
-            fv.mode = mode;
-            renderRight(tab);
-          },
-        },
-        h('span', { class: 'bi', html: svgText }),
-        label
-      );
     const allBox = h('input', { type: 'checkbox' });
     allBox.checked = fv.all;
     allBox.addEventListener('change', () => {
@@ -1849,12 +1872,7 @@
           fv.desc ? '↓ᶻᵃ' : '↑ᵃᶻ'
         ),
         h('span', { class: 'grow' }),
-        h(
-          'div',
-          { class: 'seg' },
-          seg('path', 'Caminho', '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.6"/></svg>'),
-          seg('tree', 'Árvore', '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M3 2v11h4M3 7h4" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="5" width="6" height="4" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="8" y="11" width="6" height="4" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>')
-        ),
+        fileViewSeg(tab),
         h('label', { class: 'all-files' }, allBox, 'Ver todos os arquivos')
       ),
       listBox
