@@ -1322,6 +1322,7 @@ html[data-theme='light'] .badge.stash-badge {
   padding: 3px 10px;
   position: sticky;
   top: 0;
+  z-index: 1;
 }
 
 .hunk-head .grow {
@@ -1350,6 +1351,8 @@ html[data-theme='light'] .badge.stash-badge {
 .dl .code {
   padding-left: 8px;
   flex: 1;
+  /* âncora do +/-: sem ela o sinal fica preso à janela e não rola junto */
+  position: relative;
 }
 
 .dl.add {
@@ -1359,8 +1362,8 @@ html[data-theme='light'] .badge.stash-badge {
 .dl.add .code::before {
   content: '+';
   color: var(--add-fg);
-  margin-left: -8px;
   position: absolute;
+  left: 0;
 }
 
 .dl.del {
@@ -1370,8 +1373,8 @@ html[data-theme='light'] .badge.stash-badge {
 .dl.del .code::before {
   content: '-';
   color: var(--del-fg);
-  margin-left: -8px;
   position: absolute;
+  left: 0;
 }
 
 .dl.meta {
