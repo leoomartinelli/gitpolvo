@@ -13,6 +13,11 @@
 
 # Novidades
 
+## Auto-stash ao trocar de branch
+
+- Em Preferências → Troca de branch, ligue "Guardar alterações no stash automaticamente" e a troca de branch com alterações sem commit não pergunta mais nada: tudo vai para um stash com o nome da branch de origem
+- Com "Reaplicar o stash ao voltar para a branch", as alterações reaparecem quando você volta. Se der conflito, o stash fica na lista e nada se perde
+
 ## Árvore de pastas na hora de commitar
 
 - O painel de commit ganhou o seletor Caminho / Árvore, como na navegação dos commits. Na árvore, cada pasta tem um botão para fazer stage ou unstage de tudo dentro dela

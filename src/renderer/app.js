@@ -1029,6 +1029,7 @@
         return null;
       }
       if (!this.hasDirtyWorktree()) return 'bring';
+      if (this.app.settings?.autoStash) return 'autostash';
       const from = this.data.head.branch || 'HEAD';
       const n = this.wipCount();
       const pick = await choices(
@@ -1043,22 +1044,46 @@
       return !pick || pick === 'cancel' ? null : pick;
     }
 
-    async stashThenSwitch(name) {
-      const ok = await this.op('Stash', () => this.repo.run(['stash', 'push', '--include-untracked', '-m', `WIP antes de ${name}`]), { success: 'Alterações guardadas no stash' });
+    // Pergunta (ou, com o auto-stash ligado, guarda direto) antes de trocar.
+    // Devolve false se a troca não deve seguir.
+    async prepareSwitch(toName) {
+      const how = await this.confirmSwitchWithWip(toName);
+      if (!how) return false;
+      if (how === 'bring') return true;
+      return this.stashThenSwitch(toName, how === 'autostash');
+    }
+
+    // O autostash leva o nome da branch de origem, para ser achado na volta.
+    async stashThenSwitch(name, auto = false) {
+      const from = this.data.head.branch || this.data.head.sha || 'HEAD';
+      const msg = auto ? `autostash: ${from}` : `WIP antes de ${name}`;
+      const ok = await this.op('Stash', () => this.repo.run(['stash', 'push', '--include-untracked', '-m', msg]), {
+        success: auto ? `Alterações de ${from} guardadas no stash` : 'Alterações guardadas no stash',
+      });
       if (ok) this.collapsed.stashes = false;
       return ok;
+    }
+
+    // Ao voltar para uma branch, traz de volta o autostash mais recente dela.
+    // Se o pop der conflito, o git mantém o stash na lista.
+    async reapplyAutostash(branch) {
+      const s = this.app.settings;
+      if (!s?.autoStash || !s.autoStashReapply || !branch) return;
+      const stash = (await this.repo.stashes()).find((x) => x.msg.replace(/^On [^:]+: /, '') === `autostash: ${branch}`);
+      if (!stash) return;
+      const ok = await this.op('Reaplicar stash', () => this.repo.run(['stash', 'pop', stash.ref]), { quiet: true, success: `Alterações de ${branch} reaplicadas do stash` });
+      if (!ok) toast(`Não deu para reaplicar o stash de ${branch} sem conflito.\nEle continua na lista de stashes; resolva os conflitos ou aplique de novo depois.`, 'error');
     }
 
     async checkout(name) {
       const b = this.data.refs.local.find((x) => x.name === name);
       if (b?.current) return b.behind ? this.pull() : undefined;
-      const how = await this.confirmSwitchWithWip(name);
-      if (!how) return;
-      if (how === 'stash' && !(await this.stashThenSwitch(name))) return;
+      if (!(await this.prepareSwitch(name))) return;
       const behind = !!(b && b.behind);
       const from = await this.headState();
       const ok = await this.op(`Checkout de ${name}`, () => this.repo.run(['switch', name]), { success: behind ? undefined : `Agora em ${name}` });
       if (ok) this.recordSwitch(`checkout de ${name}`, from, await this.headState());
+      if (ok) await this.reapplyAutostash(name);
       if (ok && behind) return this.pull();
     }
 
@@ -1066,9 +1091,7 @@
       const name = full.slice(full.indexOf('/') + 1);
       const local = this.data.refs.local.find((b) => b.name === name);
       if (local) return this.checkout(name);
-      const how = await this.confirmSwitchWithWip(name);
-      if (!how) return;
-      if (how === 'stash' && !(await this.stashThenSwitch(name))) return;
+      if (!(await this.prepareSwitch(name))) return;
       const from = await this.headState();
       const ok = await this.op(`Checkout de ${full}`, () => this.repo.run(['switch', '--track', '-c', name, full]), { success: `Branch ${name} criada rastreando ${full}` });
       if (ok) this.recordSwitch(`checkout de ${full}`, from, await this.headState());
@@ -1077,6 +1100,8 @@
 
     async checkoutCommit(sha) {
       if (!(await confirmBox('Checkout de commit', `Fazer checkout de ${sha.slice(0, 7)}? Você ficará em modo "detached HEAD".`, 'Checkout'))) return;
+      // sem auto-stash o git leva o WIP junto, como sempre foi
+      if (this.app.settings?.autoStash && !(await this.prepareSwitch(sha.slice(0, 7)))) return;
       const from = await this.headState();
       const ok = await this.op('Checkout', () => this.repo.run(['switch', '--detach', sha]));
       if (ok) this.recordSwitch(`checkout de ${sha.slice(0, 7)}`, from, await this.headState());
@@ -1091,6 +1116,7 @@
       if (!r || !r.name.trim()) return;
       const name = r.name.trim().replace(/\s+/g, '-');
       const base = from || 'HEAD';
+      if (r.checkout && this.app.settings?.autoStash && !(await this.prepareSwitch(name))) return;
       const before = await this.headState();
       const ok = await this.op('Criar branch', () => this.repo.run(r.checkout ? ['switch', '-c', name, base] : ['branch', name, base]), { success: `Branch ${name} criada` });
       if (!ok) return ok;
@@ -1244,9 +1270,7 @@
 
     async mergeInto(src, dst) {
       if (dst !== this.data.head.branch) {
-        const how = await this.confirmSwitchWithWip(dst);
-        if (!how) return;
-        if (how === 'stash' && !(await this.stashThenSwitch(dst))) return;
+        if (!(await this.prepareSwitch(dst))) return;
         const ok = await this.op(`Checkout de ${dst}`, () => this.repo.run(['switch', dst]));
         if (!ok) return;
       }
@@ -1772,9 +1796,7 @@
       }
       // PR de fork: baixa a referência do PR numa branch local pr-N
       const name = `pr-${pr.number}`;
-      const how = await this.confirmSwitchWithWip(name);
-      if (!how) return;
-      if (how === 'stash' && !(await this.stashThenSwitch(name))) return;
+      if (!(await this.prepareSwitch(name))) return;
       return this.op(`Checkout do PR #${pr.number}`, async () => {
         await this.repo.run(['fetch', remote, `+refs/pull/${pr.number}/head:refs/heads/${name}`]);
         await this.repo.run(['switch', name]);
@@ -1910,9 +1932,7 @@
     }
 
     async createBranchNamed(name) {
-      const how = await this.confirmSwitchWithWip(name);
-      if (!how) return;
-      if (how === 'stash' && !(await this.stashThenSwitch(name))) return;
+      if (!(await this.prepareSwitch(name))) return;
       return this.op('Criar branch', () => this.repo.run(['switch', '-c', name]), { success: `Branch ${name} criada` });
     }
 
@@ -1998,9 +2018,7 @@
       const name = await prompt(`Iniciar ${label}`, kind === 'feature' ? 'Nome da feature' : 'Versão', '', { ok: 'Iniciar', message: `Cria ${f.prefix[kind]}<nome> a partir de ${base} e troca para ela.` });
       if (!name) return;
       const branch = f.prefix[kind] + name.replace(/\s+/g, '-');
-      const how = await this.confirmSwitchWithWip(branch);
-      if (!how) return;
-      if (how === 'stash' && !(await this.stashThenSwitch(branch))) return;
+      if (!(await this.prepareSwitch(branch))) return;
       return this.op(`Iniciar ${branch}`, () => this.repo.run(['switch', '-c', branch, base]), { success: `Agora em ${branch}` });
     }
 
@@ -3539,6 +3557,9 @@
             { value: '300', label: 'A cada 5 minutos' },
           ],
         },
+        { section: 'Troca de branch' },
+        { name: 'autoStash', label: 'Guardar alterações no stash automaticamente ao trocar de branch', type: 'checkbox', value: !!s.autoStash },
+        { name: 'autoStashReapply', label: 'Reaplicar o stash ao voltar para a branch', type: 'checkbox', value: !!s.autoStashReapply, enabledBy: 'autoStash' },
         { section: 'Aparência' },
         { name: 'theme', label: 'Tema', value: document.documentElement.dataset.theme || 'dark', options: [{ value: 'dark', label: 'Escuro' }, { value: 'light', label: 'Claro' }] },
         { name: 'diffSplit', label: 'Diff', value: s.diffSplit ? 'split' : 'unified', options: [{ value: 'unified', label: 'Unificado' }, { value: 'split', label: 'Lado a lado' }] },
@@ -3584,7 +3605,7 @@
       document.documentElement.dataset.theme = r.theme;
       UI.avatars.enabled = r.avatars;
       V.setDiffPrefs(r.diffSplit === 'split');
-      this.settings = await polvo.settings.set({ theme: r.theme, avatars: r.avatars, diffSplit: r.diffSplit === 'split', autoFetch: r.autoFetch, fetchInterval: Number(r.fetchInterval), editorCmd: r.editorCmd.trim() });
+      this.settings = await polvo.settings.set({ theme: r.theme, avatars: r.avatars, diffSplit: r.diffSplit === 'split', autoFetch: r.autoFetch, autoStash: r.autoStash, autoStashReapply: r.autoStashReapply, fetchInterval: Number(r.fetchInterval), editorCmd: r.editorCmd.trim() });
       this.startAutoFetch();
       toast('Preferências salvas');
       if (this.active) this.active.render();
