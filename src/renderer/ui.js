@@ -189,7 +189,9 @@ function form(title, fields, { ok = 'OK', danger = false, message, wide = false 
         });
         body.append(h('h2', {}, title));
         if (message) body.append(h('div', { class: 'msg' }, message));
+        const deps = [];
         for (const f of fields) {
+          if (f.enabledBy) deps.push(f);
           if (f.section) {
             body.append(h('h3', { class: 'form-section' }, f.section));
             if (f.note) body.append(h('div', { class: 'form-note' }, f.note));
@@ -230,6 +232,18 @@ function form(title, fields, { ok = 'OK', danger = false, message, wide = false 
               )
             : input;
           body.append(h('label', {}, f.label, control));
+        }
+        // checkbox que só vale com outro marcado (enabledBy: nome do outro)
+        for (const f of deps) {
+          const src = inputs[f.enabledBy];
+          const el = inputs[f.name];
+          if (!src || !el) continue;
+          const sync = () => {
+            el.disabled = !src.checked;
+            el.parentElement.classList.toggle('disabled', el.disabled);
+          };
+          src.addEventListener('change', sync);
+          sync();
         }
         body.append(
           h(
