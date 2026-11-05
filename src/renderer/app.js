@@ -1023,13 +1023,14 @@
 
     // Sem commit, o git leva o WIP para a outra branch. Se a pessoa commit/push
     // depois, o trabalho da branch anterior sobe sem ela ter pedido.
-    async confirmSwitchWithWip(toName) {
+    async confirmSwitchWithWip(toName, pulling) {
       if (this.data.status?.conflicts?.length) {
         toast('Resolva os conflitos antes de trocar de branch.', 'error');
         return null;
       }
       if (!this.hasDirtyWorktree()) return 'bring';
-      if (this.app.settings?.autoStash) return 'autostash';
+      // no meio de um merge ou rebase, o stash descartaria a operação em andamento
+      if ((pulling && this.data.state === 'clean') || this.app.settings?.autoStash) return 'autostash';
       const from = this.data.head.branch || 'HEAD';
       const n = this.wipCount();
       const pick = await choices(
@@ -1046,8 +1047,10 @@
 
     // Pergunta (ou, com o auto-stash ligado, guarda direto) antes de trocar.
     // Devolve false se a troca não deve seguir.
-    async prepareSwitch(toName) {
-      const how = await this.confirmSwitchWithWip(toName);
+    // pulling: a troca termina em pull; o WIP vai direto para o stash e a pergunta
+    // de aplicar vem depois, em offerStash.
+    async prepareSwitch(toName, pulling = false) {
+      const how = await this.confirmSwitchWithWip(toName, pulling);
       if (!how) return false;
       if (how === 'bring') return true;
       return this.stashThenSwitch(toName, how === 'autostash');
@@ -1070,21 +1073,43 @@
       const s = this.app.settings;
       if (!s?.autoStash || !s.autoStashReapply || !branch) return;
       const stash = (await this.repo.stashes()).find((x) => x.msg.replace(/^On [^:]+: /, '') === `autostash: ${branch}`);
-      if (!stash) return;
-      const ok = await this.op('Reaplicar stash', () => this.repo.run(['stash', 'pop', stash.ref]), { quiet: true, success: `Alterações de ${branch} reaplicadas do stash` });
+      if (stash) await this.popStash(stash.ref, branch);
+    }
+
+    async popStash(ref, branch) {
+      const ok = await this.op('Reaplicar stash', () => this.repo.run(['stash', 'pop', ref]), { quiet: true, success: `Alterações de ${branch} reaplicadas do stash` });
       if (!ok) toast(`Não deu para reaplicar o stash de ${branch} sem conflito.\nEle continua na lista de stashes; resolva os conflitos ou aplique de novo depois.`, 'error');
+    }
+
+    // Depois do pull em outra branch: as alterações trazidas no stash entram nela?
+    async offerStash(sha, from, to) {
+      if ((await this.repo.status()).conflicts.length) return toast(`As alterações de ${from} continuam no stash.\nResolva os conflitos de ${to} e aplique o stash depois, se quiser.`, 'error');
+      const pick = await choices('Aplicar as alterações?', `As alterações sem commit de "${from}" foram guardadas no stash antes do pull em "${to}".\nQuer aplicá-las em "${to}"?`, [
+        { id: 'keep', label: 'Não, deixar no stash' },
+        { id: 'apply', label: `Aplicar em ${to}`, primary: true },
+      ]);
+      if (pick !== 'apply') return;
+      const stash = (await this.repo.stashes()).find((x) => x.sha === sha);
+      if (stash) await this.popStash(stash.ref, from);
     }
 
     async checkout(name) {
       const b = this.data.refs.local.find((x) => x.name === name);
       if (b?.current) return b.behind ? this.pull() : undefined;
-      if (!(await this.prepareSwitch(name))) return;
       const behind = !!(b && b.behind);
+      const origin = this.data.head.branch || this.data.head.sha || 'HEAD';
+      const stashTop = async () => (await this.repo.raw(['rev-parse', '-q', '--verify', 'refs/stash'])).stdout.trim();
+      const topBefore = await stashTop();
+      if (!(await this.prepareSwitch(name, behind))) return;
+      // pelo sha, porque o reapply e o pull abaixo podem mudar as posições na lista
+      const topAfter = await stashTop();
+      const stashSha = behind && topAfter !== topBefore ? topAfter : null;
       const from = await this.headState();
       const ok = await this.op(`Checkout de ${name}`, () => this.repo.run(['switch', name]), { success: behind ? undefined : `Agora em ${name}` });
       if (ok) this.recordSwitch(`checkout de ${name}`, from, await this.headState());
       if (ok) await this.reapplyAutostash(name);
-      if (ok && behind) return this.pull();
+      if (ok && behind) await this.pull();
+      if (ok && stashSha) await this.offerStash(stashSha, origin, name);
     }
 
     async checkoutRemote(full) {
@@ -2193,12 +2218,16 @@
       if (!b || !b.upstream) return toast(`A branch "${head.branch}" não tem upstream. Faça push primeiro para criar.`, 'error');
       const flag = mode === 'rebase' ? '--rebase' : mode === 'ff-only' ? '--ff-only' : '--no-rebase';
       return this.op('Pull', async () => {
-        const r = await this.repo.raw(['pull', flag, '--no-edit']);
+        // --autostash guarda o WIP só se houver o que trazer e o aplica no fim.
+        // Num conflito do pull, o git reaplica ao concluir ou abortar o merge/rebase.
+        const r = await this.repo.raw(['pull', flag, '--autostash', '--no-edit']);
+        const out = r.stdout + r.stderr;
         if (r.code !== 0) {
-          if (/CONFLICT/.test(r.stdout + r.stderr)) return toast('Pull gerou conflitos. Resolva os arquivos e faça commit.', 'error');
+          if (/CONFLICT/.test(out)) return toast('Pull gerou conflitos. Resolva os arquivos e faça commit.\nSuas alterações sem commit voltam quando o merge ou rebase terminar.', 'error');
           throw new Error(r.stderr || r.stdout);
         }
-        toast(/Already up to date/i.test(r.stdout) ? 'Já está atualizado' : 'Pull concluído');
+        if (/Applying autostash resulted in conflicts/i.test(out)) return toast('Pull concluído, mas suas alterações sem commit conflitaram com o que veio do remoto.\nResolva os arquivos; uma cópia delas continua na lista de stashes.', 'error');
+        toast(/Already up to date/i.test(r.stdout) ? 'Já está atualizado' : /Applied autostash/i.test(out) ? 'Pull concluído, alterações sem commit reaplicadas' : 'Pull concluído');
       }, { undoHead: 'keep', undoLabel: 'pull' });
     }
 

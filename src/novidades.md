@@ -13,6 +13,11 @@
 
 # Novidades
 
+## Pull com alterações sem commit
+
+- Pull na branch atual não trava mais por causa de alterações sem commit: elas vão para o stash e voltam sozinhas no fim. Se conflitarem com o que veio do remoto, uma cópia fica na lista de stashes
+- "Checkout e pull" de outra branch guarda as alterações no stash e, depois do pull, pergunta se você quer aplicá-las na branch escolhida. Se não quiser, elas continuam no stash
+
 ## Auto-stash ao trocar de branch
 
 - Em Preferências → Troca de branch, ligue "Guardar alterações no stash automaticamente" e a troca de branch com alterações sem commit não pergunta mais nada: tudo vai para um stash com o nome da branch de origem
