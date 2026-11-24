@@ -13,6 +13,10 @@
 
 # Novidades
 
+## Branch atual à esquerda no grafo
+
+- A branch em que você está passa a ser a linha principal do grafo, à esquerda, com as fotos dos autores. A main e as outras branches vão para as colunas da direita
+
 ## Pull com alterações sem commit
 
 - Pull na branch atual não trava mais por causa de alterações sem commit: elas vão para o stash e voltam sozinhas no fim. Se conflitarem com o que veio do remoto, uma cópia fica na lista de stashes
