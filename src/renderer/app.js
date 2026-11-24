@@ -126,7 +126,7 @@
         this.data = { head, refs, stashes, status, state, submodules, worktrees, identity, hooks, template, lfs, flow };
         if (state !== 'clean' && !this.commitDraft.summary) await this.prefillSequencerMessage();
         this.commits = commits;
-        this.layout = layoutGraph(commits);
+        this.layout = layoutGraph(commits, headSha);
         this.owners = branchOwners(commits, this.layout.rows);
         this.shaIndex = new Map(commits.map((c, i) => [c.sha, i]));
         this.hasMoreCommits = commits.length >= this.logLimit;

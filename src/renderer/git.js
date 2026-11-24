@@ -552,9 +552,11 @@ function linesPatch(file, picked, { reverse = false } = {}) {
 // Atribui colunas (lanes) a cada commit e produz as arestas desenhadas por linha.
 // `lanes[i]` guarda o SHA esperado naquela coluna; colunas liberadas viram null e
 // são reaproveitadas, mantendo as linhas estáveis verticalmente.
-function layoutGraph(commits) {
+// Com `headSha`, a coluna 0 fica reservada para a cadeia de primeiros pais do
+// HEAD: a branch em que se está vira a linha principal, à esquerda.
+function layoutGraph(commits, headSha) {
   const index = new Map(commits.map((c, i) => [c.sha, i]));
-  let lanes = [];
+  let lanes = headSha && index.has(headSha) ? [headSha] : [];
   let maxLanes = 1;
   const rows = [];
   for (const c of commits) {

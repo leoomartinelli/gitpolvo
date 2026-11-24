@@ -10,7 +10,7 @@ const { execFileSync } = require('node:child_process');
 
 const sandbox = { window: {} };
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/renderer/git.js'), 'utf8'), sandbox);
-const { parseBlame, remoteWeb } = sandbox.window.GitLayer;
+const { parseBlame, remoteWeb, layoutGraph } = sandbox.window.GitLayer;
 
 test('remoteWeb reconhece https, ssh e scp do GitHub, GitLab e Bitbucket', () => {
   const sha = 'abc123';
@@ -55,4 +55,22 @@ test('parseWorktrees separa diretório principal, branch e detached', () => {
     'worktree /repo\nHEAD aaa\nbranch refs/heads/main\n\nworktree /repo-feat\nHEAD bbb\nbranch refs/heads/feat/x\nlocked\n\nworktree /tmp/solto\nHEAD ccc\ndetached\nprunable gitdir file points to non-existent location\n'
   );
   assert.equal(list.map((w) => `${w.path}|${w.branch}|${w.detached}|${w.locked}|${w.prunable}`).join(' '), '/repo|main|false|false|false /repo-feat|feat/x|false|true|false /tmp/solto|null|true|false|true');
+});
+
+test('layoutGraph põe a branch do HEAD na coluna 0, à esquerda da main', () => {
+  // main (M2) faz merge de x; HEAD (F1) é uma branch saindo de M1
+  const commits = [
+    { sha: 'M2', parents: ['M1', 'X1'] },
+    { sha: 'F1', parents: ['M1'] },
+    { sha: 'X1', parents: ['M1'] },
+    { sha: 'M1', parents: [] },
+  ];
+  const semHead = layoutGraph(commits).rows.map((r) => r.col);
+  assert.equal(semHead[0], 0);
+  assert.notEqual(semHead[1], 0); // antes: HEAD ficava à direita da main
+  const rows = layoutGraph(commits, 'F1').rows;
+  assert.equal(rows[1].col, 0); // HEAD
+  assert.notEqual(rows[0].col, 0); // main sai da coluna 0
+  assert.equal(rows[3].col, 0); // base comum continua na linha do HEAD
+  assert.ok(rows[3].incoming.includes(0));
 });
