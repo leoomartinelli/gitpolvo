@@ -36,7 +36,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # 24.04 fixo: no ubuntu-26.04 (ubuntu-latest desde nov/2026) o rpmbuild falha
+          - os: ubuntu-24.04
             target: --linux
           - os: windows-latest
             target: --win
